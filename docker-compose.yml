@@ -1,0 +1,92 @@
+services:
+  therapieplan-sync:
+    build: .
+    image: therapieplan-calendar-sync:local
+    container_name: therapieplan-calendar-sync
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file:
+      - .env
+    environment:
+      CONFIG_FILE: "/app/data/config.yaml"
+    volumes:
+      - ./data:/app/data
+
+  google-auth:
+    profiles: ["auth"]
+    build: .
+    image: therapieplan-calendar-sync:local
+    container_name: therapieplan-calendar-auth
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file:
+      - .env
+    environment:
+      CONFIG_FILE: "/app/data/config.yaml"
+      GOOGLE_AUTH_HOST: "${GOOGLE_AUTH_HOST:-localhost}"
+      GOOGLE_AUTH_BIND_ADDR: "${GOOGLE_AUTH_BIND_ADDR:-0.0.0.0}"
+      GOOGLE_AUTH_PORT: "${GOOGLE_AUTH_PORT:-6080}"
+    ports:
+      - "${GOOGLE_AUTH_PUBLISH_ADDR:-127.0.0.1}:${GOOGLE_AUTH_PORT:-6080}:${GOOGLE_AUTH_PORT:-6080}"
+    volumes:
+      - ./data:/app/data
+    command:
+      - python
+      - /app/therapieplan_sync.py
+      - --config
+      - /app/data/config.yaml
+      - --auth-only
+      - --auth-host
+      - "${GOOGLE_AUTH_HOST:-localhost}"
+      - --auth-bind-addr
+      - "${GOOGLE_AUTH_BIND_ADDR:-0.0.0.0}"
+      - --auth-port
+      - "${GOOGLE_AUTH_PORT:-6080}"
+
+  dry-run:
+    profiles: ["tools"]
+    build: .
+    image: therapieplan-calendar-sync:local
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command:
+      - python
+      - /app/therapieplan_sync.py
+      - --config
+      - /app/data/config.yaml
+      - --dry-run
+      - --dump-plan
+      - plan.json
+      - --verbose
+
+  test-notification:
+    profiles: ["tools"]
+    build: .
+    image: therapieplan-calendar-sync:local
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command:
+      - python
+      - /app/therapieplan_sync.py
+      - --config
+      - /app/data/config.yaml
+      - --test-notification
+      - --verbose
+
+  run-once:
+    profiles: ["tools"]
+    build: .
+    image: therapieplan-calendar-sync:local
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file:
+      - .env
+    environment:
+      CONFIG_FILE: "/app/data/config.yaml"
+      RUN_ONCE: "1"
+    volumes:
+      - ./data:/app/data

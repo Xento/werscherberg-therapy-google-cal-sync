@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Docker / local runtime
+*.log
+
+# Local secrets and runtime state
+.env
+.env.local
+.env.*.local
+!/.env.example
+
+data/config.yaml
+data/config.local.yaml
+data/credentials.json
+data/token.json
+data/state.json
+data/plan.json
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,136 @@
+# Therapieplan -> Google Kalender Sync
+#
+# Mehrere Therapieplan-URLs werden über therapy_plans synchronisiert.
+# Alle Quellen können in einen oder mehrere Google-Kalender geschrieben werden.
+# Standard: google.calendar_ids gilt für alle Pläne.
+# Optional: therapy_plans[].calendar_ids überschreibt die Zielkalender für einen einzelnen Plan.
+
+therapy:
+  # Gemeinsame Defaults für alle Einträge unter therapy_plans.
+  # Einzelne Pläne können diese Werte überschreiben.
+  request_timeout_seconds: 30
+  verify_tls: true
+  user_agent: "therapieplan-calendar-sync/1.3"
+
+therapy_plans:
+  - id: "plan-kind-1"
+    name: "Therapieplan Kind 1"
+    url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/REPLACE_ME_1/"
+    birth_date: ""
+    # Optional: leer lassen, wird nach erfolgreichem Login in state.json gespeichert.
+    access_token: ""
+    # Google Calendar Event-Farbe. Zulässig: 1-11 oder Namen wie blueberry, basil, tomato.
+    color_id: "9"
+    # Optional: eigene Zielkalender nur für diesen Plan.
+    # Wenn leer/auskommentiert, werden google.calendar_ids genutzt.
+    # calendar_ids:
+    #   - "primary"
+    #   - "abcdef1234567890@group.calendar.google.com"
+    # Optional: Erinnerung nur für diesen Plan in Minuten vor Terminbeginn. Leer = globaler Wert bzw. Kalenderstandard.
+    reminder_minutes:
+    reminder_method: "popup"
+    # Optional. Leer = nur Leistungsname; Beispiel: "Kind 1: "
+    event_prefix: ""
+
+  - id: "plan-kind-2"
+    name: "Therapieplan Kind 2"
+    url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/REPLACE_ME_2/"
+    birth_date: ""
+    access_token: ""
+    color_id: "10"
+    reminder_minutes:
+    reminder_method: "popup"
+    event_prefix: ""
+
+# Globale Zielkalender. Alle oben definierten Quellen werden in diese Kalender geschrieben,
+# sofern ein Plan nicht eigene therapy_plans[].calendar_ids definiert.
+google:
+  credentials_file: "credentials.json"
+  token_file: "token.json"
+
+  # Rückwärtskompatibel: ein einzelner Kalender.
+  calendar_id: "primary"
+
+  # Neu: mehrere Zielkalender. Wenn calendar_ids gesetzt ist, wird calendar_id ignoriert.
+  # calendar_ids:
+  #   - "primary"
+  #   - "abcdef1234567890@group.calendar.google.com"
+  timezone: "Europe/Berlin"
+
+sync:
+  state_file: "state.json"
+  source_name: "therapieplan-sync"
+  # Globaler Prefix, falls ein Plan kein eigenes event_prefix definiert.
+  event_prefix: "Therapie: "
+  include_past_days: 0
+  delete_missing_future: true
+  dry_run: false
+  include_details_in_description: true
+  visibility: "default"
+  transparency: "opaque"
+  # Optional: globale Google-Kalender-Erinnerung in Minuten vor Terminbeginn.
+  # Leer lassen, wenn die Standarderinnerungen des Zielkalenders genutzt werden sollen.
+  # Beispiel: reminder_minutes: 30
+  reminder_minutes:
+  reminder_method: "popup"
+  # Erweiterte Alternative. Wird nur genutzt, wenn reminder_minutes leer ist.
+  reminders:
+    use_default: true
+    overrides: []
+
+notifications:
+  enabled: false
+  notify_on:
+    changes: true              # Push bei neuen/geänderten/abgesagten Terminen
+    errors: true               # Push bei Sync-Fehlern
+    success_no_changes: false  # Push auch wenn nichts geändert wurde
+
+  # true = Push enthält die betroffenen Termine mit Datum/Uhrzeit/Titel.
+  include_change_details: true
+  # Maximale Anzahl einzelner Termine in einer Pushmeldung.
+  max_change_items: 12
+  # Pushover ist bei langen Nachrichten begrenzt. 950 ist praxisnah und verhindert API-Fehler.
+  max_message_chars: 950
+
+  # Eskalationslogik für geänderte/neue/abgesagte Termine:
+  # Stufe 0 = Terminänderungen für spätere Tage
+  # Stufe 1 = Terminänderungen am gleichen Kalendertag
+  # Stufe 2 = Terminänderungen im nächsten Abschnitt zwischen zwei Sync-Uhrzeiten
+  intense_same_day_changes: true
+  intense_next_sync_window_changes: true
+
+  # Pushover-Stufen. priority/sound sind je Stufe getrennt einstellbar.
+  # priority: -2 = lautlos, -1 = quiet, 0 = normal, 1 = high, 2 = emergency
+  # Bei priority 2 werden retry und expire benötigt.
+  pushover_levels:
+    level0_future:
+      priority: 0
+      sound: "pushover"
+      retry: 60
+      expire: 1800
+    level1_same_day:
+      priority: 1
+      sound: "persistent"
+      retry: 60
+      expire: 1800
+    level2_next_window:
+      priority: 2
+      sound: "echo"
+      retry: 60
+      expire: 1800
+
+  title_prefix: "Therapieplan"
+  providers:
+    pushover:
+      enabled: false
+      token: ""
+      user: ""
+      device: ""
+      # Fallback/Legacy. Für Terminänderungen werden bevorzugt pushover_levels genutzt.
+      priority: 0
+      sound: "pushover"
+    homeassistant:
+      enabled: false
+      url: "http://homeassistant.local:8123"
+      token: ""
+      notify_service: ""
