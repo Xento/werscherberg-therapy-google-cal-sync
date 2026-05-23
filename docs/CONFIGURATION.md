@@ -35,6 +35,30 @@ SYNC_TIMES=06:15,12:15,18:15,22:15
 
 `RUN_ON_START=1` führt direkt beim Containerstart zusätzlich einen Sync aus.
 
+### Neuversuche nach Sync-Zeitpunkten
+
+```env
+SYNC_RETRY_ENABLED=1
+SYNC_RETRY_MAX_ATTEMPTS=3
+SYNC_RETRY_DELAY_SECONDS=300
+SYNC_RETRY_WHEN_NO_CHANGES=1
+SYNC_RETRY_WHEN_ERRORS=1
+SYNC_STATS_FILE=/app/data/last_sync_stats.json
+```
+
+Bedeutung:
+
+| Variable | Bedeutung | Standard |
+|---|---|---:|
+| `SYNC_RETRY_ENABLED` | Neuversuche aktivieren/deaktivieren | `1` |
+| `SYNC_RETRY_MAX_ATTEMPTS` | Anzahl zusätzlicher Versuche nach dem ersten Lauf | `3` |
+| `SYNC_RETRY_DELAY_SECONDS` | Abstand zwischen den Neuversuchen in Sekunden | `300` |
+| `SYNC_RETRY_WHEN_NO_CHANGES` | Neuversuch, wenn keine Kalenderänderung erkannt wurde | `1` |
+| `SYNC_RETRY_WHEN_ERRORS` | Neuversuch bei Fehlern oder Teilfehlern | `1` |
+| `SYNC_STATS_FILE` | interne JSON-Statistik für den Daemon | `/app/data/last_sync_stats.json` |
+
+Beispiel: Bei `SYNC_TIMES=06:00,12:00,18:00,22:00` und den Standardwerten läuft ein geplanter Sync um 06:00. Wenn keine neuen/geänderten/gelöschten Termine erkannt wurden oder ein Fehler auftrat, folgen bis zu drei Neuversuche um 06:05, 06:10 und 06:15.
+
 ### Google OAuth Redirect
 
 Browser auf demselben Host:

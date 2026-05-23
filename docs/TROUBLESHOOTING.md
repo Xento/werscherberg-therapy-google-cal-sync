@@ -263,3 +263,55 @@ Oder in `.env`:
 ```env
 VERBOSE=1
 ```
+
+## `Network is unreachable` zu `oauth2.googleapis.com`
+
+Fehlerbild:
+
+```text
+HTTPSConnectionPool(host='oauth2.googleapis.com', port=443)
+Failed to establish a new connection: [Errno 101] Network is unreachable
+```
+
+Das ist kein Therapieplan-Loginfehler. Der Container konnte in diesem Moment den Google-OAuth-Token-Endpunkt nicht erreichen. Typische Ursachen:
+
+- Docker-Host hatte kurzzeitig kein Internet.
+- DNS-/Routingproblem im Docker-Netz.
+- Firewall/Proxy blockiert ausgehende HTTPS-Verbindungen aus Containern.
+- Kurzzeitiges Netzwerkproblem direkt während einer Google-Token-Aktualisierung.
+
+Prüfen:
+
+```bash
+docker exec -it therapieplan-calendar-sync sh
+python - <<'PY'
+import urllib.request
+print(urllib.request.urlopen('https://oauth2.googleapis.com/token', timeout=10).status)
+PY
+```
+
+Ein HTTP-Fehler wie `405` wäre als Erreichbarkeitstest ausreichend, weil der Endpunkt erreichbar ist. Ein DNS-, Timeout- oder Network-Unreachable-Fehler weist auf Netzwerk/Routing hin.
+
+Die geplanten Neuversuche können solche kurzzeitigen Fehler abfangen:
+
+```env
+SYNC_RETRY_ENABLED=1
+SYNC_RETRY_MAX_ATTEMPTS=3
+SYNC_RETRY_DELAY_SECONDS=300
+SYNC_RETRY_WHEN_ERRORS=1
+```
+
+## Neuversuche laufen zu oft
+
+Wenn bei jedem geplanten Zeitpunkt zusätzliche Läufe erfolgen, liegt das meist an:
+
+```env
+SYNC_RETRY_WHEN_NO_CHANGES=1
+```
+
+Dann wird auch bei einem erfolgreichen Lauf ohne Kalenderänderungen erneut versucht. Wenn du nur Fehler erneut versuchen willst:
+
+```env
+SYNC_RETRY_WHEN_NO_CHANGES=0
+SYNC_RETRY_WHEN_ERRORS=1
+```

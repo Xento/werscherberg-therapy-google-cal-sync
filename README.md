@@ -132,6 +132,14 @@ TZ=Europe/Berlin
 SYNC_TIMES=06:00,12:00,18:00,22:00
 RUN_ON_START=0
 
+# Neuversuche nach einem geplanten Sync-Zeitpunkt.
+# Default: 3 Neuversuche alle 5 Minuten, wenn keine Änderungen gefunden wurden oder Fehler auftraten.
+SYNC_RETRY_ENABLED=1
+SYNC_RETRY_MAX_ATTEMPTS=3
+SYNC_RETRY_DELAY_SECONDS=300
+SYNC_RETRY_WHEN_NO_CHANGES=1
+SYNC_RETRY_WHEN_ERRORS=1
+
 NOTIFICATIONS_ENABLED=1
 NOTIFY_ON_CHANGES=1
 NOTIFY_ON_ERRORS=1
@@ -157,6 +165,23 @@ GOOGLE_AUTH_BIND_ADDR=0.0.0.0
 GOOGLE_AUTH_PORT=6080
 GOOGLE_AUTH_PUBLISH_ADDR=127.0.0.1
 ```
+
+
+## Geplante Neuversuche
+
+Nach jedem geplanten Sync-Zeitpunkt kann der Daemon automatisch weitere Läufe ausführen. Das ist nützlich, wenn der Therapieplan nicht exakt zur eingestellten Minute aktualisiert wird oder wenn kurzfristig ein Netzwerkfehler auftritt.
+
+Standard:
+
+```env
+SYNC_RETRY_ENABLED=1
+SYNC_RETRY_MAX_ATTEMPTS=3
+SYNC_RETRY_DELAY_SECONDS=300
+SYNC_RETRY_WHEN_NO_CHANGES=1
+SYNC_RETRY_WHEN_ERRORS=1
+```
+
+Damit läuft z. B. bei `SYNC_TIMES=06:00,12:00,18:00,22:00` ein Sync um 06:00 und, wenn keine Änderungen erkannt wurden oder ein Fehler auftrat, optional weitere Versuche um 06:05, 06:10 und 06:15.
 
 ## Repository-Struktur
 

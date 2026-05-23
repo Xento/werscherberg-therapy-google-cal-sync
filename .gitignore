@@ -28,3 +28,5 @@ data/plan.json
 Thumbs.db
 .vscode/
 .idea/
+
+data/last_sync_stats.json

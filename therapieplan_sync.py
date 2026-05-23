@@ -1773,6 +1773,16 @@ def setup_logging(verbose: bool) -> None:
     )
 
 
+def write_stats_if_requested(base_dir: Path, stats_file_arg: Optional[str], stats: Dict[str, Any]) -> None:
+    if not stats_file_arg:
+        return
+    stats_path = resolve_path(base_dir, stats_file_arg)
+    payload = dict(stats)
+    payload["written_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    write_json_atomic(stats_path, payload)
+    logging.debug("Stats-Datei geschrieben: %s", stats_path)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Therapieplan in Google Kalender synchronisieren")
     parser.add_argument("--config", default="config.yaml", help="Pfad zur config.yaml")
@@ -1784,6 +1794,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--auth-bind-addr", default=os.environ.get("GOOGLE_AUTH_BIND_ADDR", "0.0.0.0"), help="OAuth Bind-Adresse im Container")
     parser.add_argument("--auth-port", type=int, default=int(os.environ.get("GOOGLE_AUTH_PORT", "6080")), help="OAuth Port")
     parser.add_argument("--test-notification", action="store_true", help="Test-Pushbenachrichtigung senden und beenden")
+    parser.add_argument("--stats-file", help="Schreibt die Gesamtstatistik des Laufs als JSON-Datei")
     args = parser.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -1881,16 +1892,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         state["google_last_sync_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
         state["google_last_stats"] = total_stats
         write_json_atomic(cfg.sync.state_file, state)
+        write_stats_if_requested(cfg.base_dir, args.stats_file, total_stats)
         send_notifications(cfg, stats=total_stats)
         logging.info("Fertig. Gesamtstatistik: %s", total_stats)
         return 0 if int(total_stats.get("errors", 0)) == 0 else 2
     except Exception as exc:
         logging.exception("Abbruch: %s", exc)
+        error_stats = empty_stats()
+        error_stats["errors"] = 1
+        error_stats["error_messages"] = [str(exc)]
+        try:
+            write_stats_if_requested(cfg.base_dir, args.stats_file, error_stats)
+        except Exception:
+            logging.exception("Stats-Datei konnte nicht geschrieben werden.")
         try:
             send_notifications(cfg, error=str(exc))
         except Exception:
             logging.exception("Fehlerbenachrichtigung konnte nicht gesendet werden.")
         try:
+            state["google_last_stats"] = error_stats
             write_json_atomic(cfg.sync.state_file, state)
         except Exception:
             pass

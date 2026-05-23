@@ -70,6 +70,33 @@ docker logs -f therapieplan-calendar-sync
 docker ps
 ```
 
+## Neuversuche prüfen
+
+Die Neuversuche werden im Containerlog protokolliert:
+
+```bash
+./scripts/logs.sh
+```
+
+Typische Logzeilen:
+
+```text
+Neuversuch geplant in 300 Sekunden: keine Kalenderänderungen erkannt
+Starte Sync-Neuversuch 1/3.
+```
+
+Die zuletzt vom Daemon gelesene Sync-Statistik liegt standardmäßig hier:
+
+```text
+data/last_sync_stats.json
+```
+
+Anzeigen:
+
+```bash
+cat data/last_sync_stats.json
+```
+
 ## Automatischer Start nach Reboot
 
 Der Service nutzt:
