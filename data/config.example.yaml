@@ -10,7 +10,7 @@ therapy:
   # Einzelne Pläne können diese Werte überschreiben.
   request_timeout_seconds: 30
   verify_tls: true
-  user_agent: "therapieplan-calendar-sync/1.3"
+  user_agent: "therapieplan-calendar-sync/1.5"
 
 therapy_plans:
   - id: "plan-kind-1"
@@ -26,6 +26,17 @@ therapy_plans:
     # calendar_ids:
     #   - "primary"
     #   - "abcdef1234567890@group.calendar.google.com"
+    # Optional: Party-Filter. Relevant, wenn ein Plan mehrere Parteien enthält.
+    # Die neue JSON-Struktur kann z. B. Elterntermine mit party: "" und Kind-Termine mit party: "Kind 1" liefern.
+    # Beispiele:
+    # party_filter: "empty"                 # nur Eltern-/Begleitpersonen-Termine mit leerer party
+    # party_filter: "non_empty"             # alle Termine mit gesetzter party
+    # party_filter:
+    #   include: ["Kind 1"]                 # nur Termine dieser Party
+    # party_filter:
+    #   exclude: ["Kind 1"]                 # alles außer dieser Party
+    party_filter: "all"
+
     # Optional: Erinnerung nur für diesen Plan in Minuten vor Terminbeginn. Leer = globaler Wert bzw. Kalenderstandard.
     reminder_minutes:
     reminder_method: "popup"
@@ -38,6 +49,10 @@ therapy_plans:
     birth_date: ""
     access_token: ""
     color_id: "10"
+    # Beispiel: Nur Termine für diese Party übernehmen.
+    # party_filter:
+    #   include: ["Kind 2"]
+    party_filter: "all"
     reminder_minutes:
     reminder_method: "popup"
     event_prefix: ""
@@ -66,6 +81,8 @@ sync:
   delete_missing_future: true
   dry_run: false
   include_details_in_description: true
+  # true = Terminbeschreibung enthält zusätzlich, wann der Google-Termin durch den Sync erstellt/geändert wurde.
+  include_sync_timestamps_in_description: true
   visibility: "default"
   transparency: "opaque"
   # Optional: globale Google-Kalender-Erinnerung in Minuten vor Terminbeginn.
@@ -83,7 +100,7 @@ notifications:
   notify_on:
     changes: true              # Push bei neuen/geänderten/abgesagten Terminen
     errors: true               # Push bei Sync-Fehlern
-    success_no_changes: false  # Push auch wenn nichts geändert wurde
+    success_no_changes: true   # Push auch wenn nichts geändert wurde
 
   # true = Push enthält die betroffenen Termine mit Datum/Uhrzeit/Titel.
   include_change_details: true

@@ -85,7 +85,7 @@ GOOGLE_AUTH_PUBLISH_ADDR=0.0.0.0
 NOTIFICATIONS_ENABLED=1
 NOTIFY_ON_CHANGES=1
 NOTIFY_ON_ERRORS=1
-NOTIFY_ON_SUCCESS_NO_CHANGES=0
+NOTIFY_ON_SUCCESS_NO_CHANGES=1
 NOTIFICATION_TITLE_PREFIX=Therapieplan
 NOTIFY_INCLUDE_CHANGE_DETAILS=1
 NOTIFY_MAX_CHANGE_ITEMS=12
@@ -167,7 +167,7 @@ Bei Home Assistant Companion App heißen Notify-Services typischerweise `notify.
 therapy:
   request_timeout_seconds: 30
   verify_tls: true
-  user_agent: "therapieplan-calendar-sync/1.3"
+  user_agent: "therapieplan-calendar-sync/1.5"
 ```
 
 ### Mehrere Therapiepläne
@@ -192,6 +192,61 @@ therapy_plans:
 ```
 
 `id` muss stabil bleiben. Wenn du die `id` änderst, erkennt der Sync alte Termine nicht mehr als eigene Termine und kann Duplikate erzeugen.
+
+### Party-Filter
+
+Neuere Therapieplan-JSONs können mehrere Parteien in derselben Antwort enthalten. Das Feld `party` unterscheidet dabei die Zuordnung:
+
+- `party: ""` = Termine ohne benannte Party, typischerweise Eltern-/Begleitpersonen-Termine
+- `party: "Person 1"` = Termine dieser benannten Party
+
+Ohne Filter werden alle passenden Termine übernommen:
+
+```yaml
+party_filter: "all"
+```
+
+Nur Eltern-/Begleitpersonen-Termine mit leerer `party` übernehmen:
+
+```yaml
+party_filter: "empty"
+```
+
+Nur Termine mit gesetzter Party übernehmen:
+
+```yaml
+party_filter: "non_empty"
+```
+
+Nur eine konkrete Party übernehmen:
+
+```yaml
+party_filter:
+  include: ["Person 1"]
+```
+
+Mehrere Parteien übernehmen, inklusive leerer Party:
+
+```yaml
+party_filter:
+  include:
+    - ""
+    - "Person 1"
+```
+
+Alles außer einer bestimmten Party übernehmen:
+
+```yaml
+party_filter:
+  exclude: ["Person 1"]
+```
+
+Kurzformen sind ebenfalls möglich:
+
+```yaml
+party: "Person 1"
+parties: ["", "Person 1"]
+```
 
 ### Farben
 
@@ -266,6 +321,7 @@ sync:
   delete_missing_future: true
   dry_run: false
   include_details_in_description: true
+  include_sync_timestamps_in_description: true
   visibility: "default"
   transparency: "opaque"
 ```
@@ -277,6 +333,7 @@ Wichtige Werte:
 | `include_past_days` | wie viele vergangene Tage berücksichtigt werden |
 | `delete_missing_future` | zukünftige Termine löschen, wenn sie nicht mehr im Plan stehen |
 | `include_details_in_description` | Details in Terminbeschreibung übernehmen |
+| `include_sync_timestamps_in_description` | Sync-Erstell-/Änderungszeit in der Terminbeschreibung anzeigen |
 | `visibility` | `default`, `public`, `private`, `confidential` |
 | `transparency` | `opaque` = blockt Zeit, `transparent` = blockt nicht |
 
@@ -285,6 +342,22 @@ Für nicht vertrauliche normale Einträge:
 ```yaml
 visibility: "default"
 ```
+
+Sync-Zeitstempel in der Beschreibung:
+
+```yaml
+include_sync_timestamps_in_description: true
+```
+
+Damit schreibt der Sync in den Google-Termin z. B.:
+
+```text
+Sync-Informationen:
+Erstellt durch Sync: 27.05.2026 21:55:00 CEST
+Zuletzt geändert durch Sync: 28.05.2026 07:35:00 CEST
+```
+
+Die Zeitstempel werden nicht in die fachliche Änderungs-Signatur aufgenommen. Dadurch erzeugt ein unveränderter Termin nicht bei jedem Lauf erneut eine Änderung.
 
 ### Erinnerungen
 
@@ -319,7 +392,7 @@ notifications:
   notify_on:
     changes: true
     errors: true
-    success_no_changes: false
+    success_no_changes: true
   include_change_details: true
   max_change_items: 12
   max_message_chars: 950
@@ -328,3 +401,30 @@ notifications:
 ```
 
 Werte aus `.env` überschreiben die meisten Provider-/Betriebswerte und sind für Secrets vorzuziehen.
+
+## Terminart
+
+Wenn `sync.include_details_in_description: true` gesetzt ist, schreibt der Sync die Terminart zusätzlich in die Google-Terminbeschreibung, z. B.:
+
+```text
+Terminart: Gruppentermin (G)
+```
+
+Zusätzlich werden nur diese maschinenlesbaren Werte in `extendedProperties.private` des Google-Termins gespeichert:
+
+| Feld | Bedeutung |
+|---|---|
+| `form` | Rohwert aus dem Therapieplan, z. B. `E`, `G`, `C` |
+| `formLabel` | lesbare Terminart, z. B. `Gruppentermin` |
+
+Unterstützte Terminformen:
+
+| Form | Bedeutung |
+|---|---|
+| `V` | Termin |
+| `A` | allgemeiner Termin |
+| `E` | Einzeltermin |
+| `C` | kombinierter Termin / Co-Therapie |
+| `G` | Gruppentermin |
+
+`form: 1` wird als Hinweis-/Leereintrag behandelt und nicht importiert. Einträge mit gesetztem Hidden-Flag `0x20000000` werden ebenfalls nicht importiert.

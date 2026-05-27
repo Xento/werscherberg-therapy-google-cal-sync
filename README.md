@@ -114,6 +114,7 @@ sync:
   delete_missing_future: true
   dry_run: false
   include_details_in_description: true
+  include_sync_timestamps_in_description: true
   visibility: "default"
   transparency: "opaque"
   reminders:
@@ -143,7 +144,7 @@ SYNC_RETRY_WHEN_ERRORS=1
 NOTIFICATIONS_ENABLED=1
 NOTIFY_ON_CHANGES=1
 NOTIFY_ON_ERRORS=1
-NOTIFY_ON_SUCCESS_NO_CHANGES=0
+NOTIFY_ON_SUCCESS_NO_CHANGES=1
 NOTIFY_INCLUDE_CHANGE_DETAILS=1
 
 PUSHOVER_ENABLED=1
@@ -166,6 +167,28 @@ GOOGLE_AUTH_PORT=6080
 GOOGLE_AUTH_PUBLISH_ADDR=127.0.0.1
 ```
 
+
+## Party-Filter
+
+Falls eine Therapieplan-URL mehrere Parteien enthält, kann pro Quelle gefiltert werden. Leere `party`-Werte stehen typischerweise für Eltern-/Begleitpersonen-Termine; benannte Werte für Kind-/Personen-Termine.
+
+```yaml
+therapy_plans:
+  - id: "eltern"
+    name: "Eltern"
+    url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/DEIN_TOKEN/"
+    birth_date: "TT.MM.JJJJ"
+    party_filter: "empty"
+
+  - id: "person-1"
+    name: "Person 1"
+    url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/DEIN_TOKEN/"
+    birth_date: "TT.MM.JJJJ"
+    party_filter:
+      include: ["Person 1"]
+```
+
+Weitere Varianten stehen in `docs/CONFIGURATION.md`.
 
 ## Geplante Neuversuche
 
@@ -212,6 +235,8 @@ Damit läuft z. B. bei `SYNC_TIMES=06:00,12:00,18:00,22:00` ein Sync um 06:00 un
     ├── start.sh
     ├── stop.sh
     ├── logs.sh
+    ├── check-google-token.sh
+    ├── repair-google-token.sh
     ├── test-notification.sh
     ├── diagnose-pushover.sh
     └── test-pushover-levels.sh
@@ -223,3 +248,59 @@ Damit läuft z. B. bei `SYNC_TIMES=06:00,12:00,18:00,22:00` ein Sync um 06:00 un
 - Der Google-Account, mit dem OAuth durchgeführt wird, muss Schreibrechte auf alle Zielkalender haben.
 - Wenn `delete_missing_future: true` gesetzt ist, werden zukünftige Kalendertermine gelöscht, die in der jeweiligen Therapieplan-Quelle nicht mehr vorhanden sind. Nur so kann eine Entfernung als „Abgesagt“ gemeldet werden.
 - Für Pushover `priority=2` sind `retry` und `expire` Pflicht.
+
+## Terminart im Google-Termin
+
+Ab Sync-Version 1.7 wird nur die Terminart zusätzlich gespeichert. Bei aktivem
+`include_details_in_description: true` steht z. B. in der Beschreibung:
+
+```text
+Terminart: Gruppentermin (G)
+```
+
+Maschinenlesbar werden außerdem nur `form` und `formLabel` in
+`extendedProperties.private` des Google-Termins abgelegt.
+
+## Fehler: `Expecting value: line 1 column 1 (char 0)` bei `token.json`
+
+Dieser Fehler bedeutet, dass `data/token.json` leer oder beschädigt ist. Die Datei enthält das lokal gespeicherte Google-OAuth-Token. Sie kann z. B. durch einen abgebrochenen Schreibvorgang oder manuelles Bearbeiten ungültig werden.
+
+Zuerst prüfen:
+
+```bash
+./scripts/check-google-token.sh
+```
+
+Das Skript prüft `data/credentials.json` und `data/token.json` und gibt eine konkrete Handlungsempfehlung aus.
+
+Reparatur, wenn die Prüfung eine beschädigte Token-Datei meldet:
+
+```bash
+./scripts/stop.sh
+./scripts/repair-google-token.sh
+./scripts/init-google-auth.sh
+./scripts/run-once.sh
+./scripts/start.sh
+```
+
+Der Sync erkennt in der aktuellen Version eine leere oder ungültige `token.json`, sichert sie als `token.json.invalid-<timestamp>` und sendet bei aktivierter Fehlerbenachrichtigung eine Pushmeldung.
+
+
+### Sync-Zeitstempel im Termin
+
+Optional kann der Sync in die Google-Terminbeschreibung schreiben, wann der Termin durch den Sync erstmals erstellt und wann er zuletzt durch eine echte Änderung aktualisiert wurde:
+
+```yaml
+sync:
+  include_sync_timestamps_in_description: true
+```
+
+Beispiel in der Terminbeschreibung:
+
+```text
+Sync-Informationen:
+Erstellt durch Sync: 27.05.2026 21:55:00 CEST
+Zuletzt geändert durch Sync: 28.05.2026 07:35:00 CEST
+```
+
+Die Werte werden zusätzlich in `extendedProperties.private` als `syncCreatedAt` und optional `syncModifiedAt` gespeichert.

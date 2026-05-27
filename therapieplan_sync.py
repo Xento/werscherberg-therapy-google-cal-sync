@@ -15,6 +15,7 @@ Wichtige Eigenschaften:
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import datetime as dt
 import hashlib
@@ -38,9 +39,28 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
-SYNC_VERSION = "1.4"
+SYNC_VERSION = "1.8"
 SUPPORTED_FORMS = {"V", "A", "E", "C", "G"}
 HIDDEN_FLAG = 0x20000000
+
+FORM_LABELS = {
+    "1": "Hinweis / kein Termin",
+    "O": "Eintrag ohne feste Uhrzeit",
+    "V": "Termin",
+    "A": "Allgemeiner Termin",
+    "E": "Einzeltermin",
+    "C": "Kombinierter Termin / Co-Therapie",
+    "G": "Gruppentermin",
+}
+GROUP_FORMS = {"G"}
+COMBINED_FORMS = {"C"}
+
+
+@dataclasses.dataclass(frozen=True)
+class PartyFilterConfig:
+    # mode: all | include | exclude | empty | non_empty
+    mode: str = "all"
+    values: Tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,6 +71,7 @@ class TherapyConfig:
     event_prefix: Optional[str]
     color_id: str
     calendar_ids: Tuple[str, ...]
+    party_filter: PartyFilterConfig
     reminder_minutes: Optional[int]
     reminder_method: Optional[str]
     url: str
@@ -79,6 +100,7 @@ class SyncConfig:
     delete_missing_future: bool
     dry_run: bool
     include_details_in_description: bool
+    include_sync_timestamps_in_description: bool
     visibility: str
     transparency: str
     reminders: Dict[str, Any]
@@ -268,6 +290,145 @@ def normalize_calendar_ids(value: Any, *, default: Optional[Iterable[str]] = Non
 def first_calendar_id(calendar_ids: Tuple[str, ...]) -> str:
     return calendar_ids[0] if calendar_ids else "primary"
 
+
+PARTY_FILTER_ALIASES = {
+    "all": "all",
+    "alle": "all",
+    "any": "all",
+    "include": "include",
+    "only": "include",
+    "nur": "include",
+    "exclude": "exclude",
+    "except": "exclude",
+    "ohne": "exclude",
+    "empty": "empty",
+    "blank": "empty",
+    "none": "empty",
+    "parents": "empty",
+    "parent": "empty",
+    "eltern": "empty",
+    "elternteil": "empty",
+    "non_empty": "non_empty",
+    "non-empty": "non_empty",
+    "not_empty": "non_empty",
+    "children": "non_empty",
+    "child": "non_empty",
+    "kinder": "non_empty",
+    "kind": "non_empty",
+}
+
+
+def normalize_party_value(value: Any) -> str:
+    # Leere Party ist fachlich relevant: sie steht im beobachteten JSON für Eltern-/Begleitpersonen-Termine.
+    return clean_text(value)
+
+
+def normalize_party_values(value: Any) -> Tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        # Kommagetrennte Schreibweise unterstützen. Ein einzelner leerer String bleibt ein gültiger Filterwert.
+        text = str(value)
+        raw_items = [part.strip() for part in text.split(",")] if "," in text else [text]
+
+    result: List[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        party = normalize_party_value(item)
+        key = party.casefold()
+        if key not in seen:
+            result.append(party)
+            seen.add(key)
+    return tuple(result)
+
+
+def normalize_party_filter(value: Any = None, *, party: Any = None, parties: Any = None) -> PartyFilterConfig:
+    """Normalisiert die Party-Auswahl pro Therapieplan.
+
+    Unterstützte Konfigurationen:
+      party: "Person 1"                      -> nur party "Person 1"
+      parties: ["", "Person 1"]             -> nur leere Party und Person 1
+      party_filter: "empty"                  -> nur leere Party, z. B. Elterntermine
+      party_filter: "non_empty"              -> alle Einträge mit gesetzter Party, z. B. Kindertermine
+      party_filter: {include: ["Person 1"]}  -> nur Person 1
+      party_filter: {exclude: ["Person 1"]}  -> alles außer Person 1
+      party_filter: {mode: all}              -> keine Filterung
+    """
+    if party is not None:
+        return PartyFilterConfig(mode="include", values=normalize_party_values([party]))
+    if parties is not None:
+        return PartyFilterConfig(mode="include", values=normalize_party_values(parties))
+
+    if value is None or value == "":
+        return PartyFilterConfig()
+
+    if isinstance(value, str):
+        raw = value.strip()
+        mode = PARTY_FILTER_ALIASES.get(raw.casefold())
+        if mode:
+            return PartyFilterConfig(mode=mode)
+        return PartyFilterConfig(mode="include", values=normalize_party_values(raw))
+
+    if isinstance(value, (list, tuple, set)):
+        return PartyFilterConfig(mode="include", values=normalize_party_values(value))
+
+    if not isinstance(value, dict):
+        raise ValueError("party_filter muss ein String, eine Liste oder ein YAML-Objekt sein.")
+
+    if "include" in value:
+        return PartyFilterConfig(mode="include", values=normalize_party_values(value.get("include")))
+    if "exclude" in value:
+        return PartyFilterConfig(mode="exclude", values=normalize_party_values(value.get("exclude")))
+
+    mode_raw = str(value.get("mode", "all") or "all").strip().casefold()
+    mode = PARTY_FILTER_ALIASES.get(mode_raw)
+    if not mode:
+        raise ValueError("party_filter.mode muss all, include, exclude, empty oder non_empty sein.")
+    values = normalize_party_values(value.get("values", value.get("parties", value.get("party", None))))
+    if mode in {"include", "exclude"} and not values:
+        raise ValueError("party_filter mit mode include/exclude benötigt values/include/exclude.")
+    return PartyFilterConfig(mode=mode, values=values)
+
+
+def booking_party(bok: Dict[str, Any]) -> str:
+    return normalize_party_value(bok.get("party", ""))
+
+
+def party_matches_booking(bok: Dict[str, Any], cfg: TherapyConfig) -> bool:
+    party = booking_party(bok)
+    party_key = party.casefold()
+    party_filter = cfg.party_filter
+    mode = party_filter.mode
+    values = {value.casefold() for value in party_filter.values}
+
+    if mode == "all":
+        return True
+    if mode == "empty":
+        return party == ""
+    if mode == "non_empty":
+        return party != ""
+    if mode == "include":
+        return party_key in values
+    if mode == "exclude":
+        return party_key not in values
+    return True
+
+
+def describe_party_filter(party_filter: PartyFilterConfig) -> str:
+    if party_filter.mode == "all":
+        return "alle"
+    if party_filter.mode == "empty":
+        return "nur leere Party"
+    if party_filter.mode == "non_empty":
+        return "nur gesetzte Party"
+    if party_filter.mode == "include":
+        return "nur " + ", ".join([value if value else "<leer>" for value in party_filter.values])
+    if party_filter.mode == "exclude":
+        return "ohne " + ", ".join([value if value else "<leer>" for value in party_filter.values])
+    return party_filter.mode
+
 def parse_optional_int(value: Any, *, field_name: str) -> Optional[int]:
     if value is None:
         return None
@@ -413,6 +574,11 @@ def build_therapy_sources(data: Dict[str, Any], base_source_name: str) -> Tuple[
             event_prefix=event_prefix,
             color_id=normalize_color_id(merged.get("color_id", merged.get("color", ""))),
             calendar_ids=normalize_calendar_ids(merged.get("calendar_ids", merged.get("calendar_id", None))),
+            party_filter=normalize_party_filter(
+                merged.get("party_filter", None),
+                party=merged.get("party", None),
+                parties=merged.get("parties", None),
+            ),
             reminder_minutes=parse_optional_int(merged.get("reminder_minutes"), field_name=f"therapy_plans[{index}].reminder_minutes"),
             reminder_method=normalize_reminder_method(merged.get("reminder_method"), default="popup") if merged.get("reminder_method") not in (None, "") else None,
             url=str(merged.get("url", "")).strip(),
@@ -420,7 +586,7 @@ def build_therapy_sources(data: Dict[str, Any], base_source_name: str) -> Tuple[
             access_token=str(access_token or "").strip(),
             request_timeout_seconds=int(merged.get("request_timeout_seconds", 30)),
             verify_tls=bool(merged.get("verify_tls", True)),
-            user_agent=str(merged.get("user_agent", "therapieplan-calendar-sync/1.2")),
+            user_agent=str(merged.get("user_agent", "therapieplan-calendar-sync/1.5")),
         )
         if not source.url.startswith("http"):
             raise ValueError(f"therapy_plans[{index}].url fehlt oder ist ungültig.")
@@ -501,6 +667,7 @@ def load_config(path: Path) -> AppConfig:
             delete_missing_future=bool(sync.get("delete_missing_future", True)),
             dry_run=bool(sync.get("dry_run", False)),
             include_details_in_description=bool(sync.get("include_details_in_description", True)),
+            include_sync_timestamps_in_description=bool(sync.get("include_sync_timestamps_in_description", True)),
             visibility=str(sync.get("visibility", "private")),
             transparency=str(sync.get("transparency", "opaque")),
             reminders=normalize_reminders(sync.get("reminders", {"use_default": True, "overrides": []})),
@@ -511,7 +678,7 @@ def load_config(path: Path) -> AppConfig:
             enabled=env_bool_or_config("NOTIFICATIONS_ENABLED", notifications, "enabled", False),
             notify_on_changes=env_bool_or_config("NOTIFY_ON_CHANGES", notify_on, "changes", True),
             notify_on_errors=env_bool_or_config("NOTIFY_ON_ERRORS", notify_on, "errors", True),
-            notify_on_success_no_changes=env_bool_or_config("NOTIFY_ON_SUCCESS_NO_CHANGES", notify_on, "success_no_changes", False),
+            notify_on_success_no_changes=env_bool_or_config("NOTIFY_ON_SUCCESS_NO_CHANGES", notify_on, "success_no_changes", True),
             include_change_details=env_bool_or_config("NOTIFY_INCLUDE_CHANGE_DETAILS", notifications, "include_change_details", True),
             max_change_items=int(env_or_config("NOTIFY_MAX_CHANGE_ITEMS", notifications, "max_change_items", 12) or 12),
             max_message_chars=int(env_or_config("NOTIFY_MAX_MESSAGE_CHARS", notifications, "max_message_chars", 950) or 950),
@@ -712,6 +879,22 @@ def clean_text(value: Any) -> str:
     return " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
 
 
+def booking_form(bok: Dict[str, Any]) -> str:
+    return clean_text(bok.get("form")).upper()
+
+
+def form_label(form: str) -> str:
+    return FORM_LABELS.get(clean_text(form).upper(), "Unbekannte Terminart")
+
+
+def is_group_appointment(form: str) -> bool:
+    return clean_text(form).upper() in GROUP_FORMS
+
+
+def is_combined_appointment(form: str) -> bool:
+    return clean_text(form).upper() in COMBINED_FORMS
+
+
 def first_non_empty(mapping: Dict[str, Any], keys: Iterable[str]) -> str:
     for key in keys:
         value = clean_text(mapping.get(key))
@@ -733,6 +916,14 @@ def build_description(bok: Dict[str, Any], include_details: bool) -> str:
         return "Automatisch aus dem Therapieplan synchronisiert."
 
     lines: List[str] = []
+    form = booking_form(bok)
+    if form:
+        lines.append(f"Terminart: {form_label(form)} ({form})")
+
+    party = booking_party(bok)
+    if party:
+        lines.append(f"Party: {party}")
+
     for label, keys in [
         ("Mitarbeiter", ["employee"]),
         ("Raum", ["location"]),
@@ -750,6 +941,94 @@ def build_description(bok: Dict[str, Any], include_details: bool) -> str:
     lines.append("")
     lines.append("Automatisch aus dem Therapieplan synchronisiert.")
     return "\n".join(lines).strip()
+
+
+
+
+def now_utc_stamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def format_sync_timestamp(value: str, timezone: str) -> str:
+    try:
+        parsed = parse_datetime(value, ZoneInfo(timezone))
+    except Exception:
+        return clean_text(value)
+    return parsed.astimezone(ZoneInfo(timezone)).strftime("%d.%m.%Y %H:%M:%S %Z")
+
+
+def append_sync_timestamp_section(
+    description: str,
+    cfg: AppConfig,
+    *,
+    created_at: str,
+    modified_at: str = "",
+) -> str:
+    if not cfg.sync.include_sync_timestamps_in_description:
+        return description
+
+    lines = [description.rstrip()] if description.strip() else []
+    if lines:
+        lines.append("")
+    lines.append("Sync-Informationen:")
+    lines.append(f"Erstellt durch Sync: {format_sync_timestamp(created_at, cfg.google.timezone)}")
+    if modified_at:
+        lines.append(f"Zuletzt geändert durch Sync: {format_sync_timestamp(modified_at, cfg.google.timezone)}")
+    return "\n".join(lines).strip()
+
+
+def event_private_properties(event: Dict[str, Any]) -> Dict[str, Any]:
+    return (event.get("extendedProperties") or {}).get("private") or {}
+
+
+def existing_sync_created_at(event: Optional[Dict[str, Any]], fallback: str) -> str:
+    if event:
+        private_props = event_private_properties(event)
+        return str(private_props.get("syncCreatedAt") or event.get("created") or fallback)
+    return fallback
+
+
+def existing_sync_modified_at(event: Optional[Dict[str, Any]]) -> str:
+    if event:
+        private_props = event_private_properties(event)
+        return str(private_props.get("syncModifiedAt") or "")
+    return ""
+
+
+def body_with_sync_timestamps(
+    candidate: CalendarEventCandidate,
+    cfg: AppConfig,
+    *,
+    existing: Optional[Dict[str, Any]] = None,
+    mark_modified: bool = False,
+) -> Dict[str, Any]:
+    body = copy.deepcopy(candidate.google_body)
+    now_stamp = now_utc_stamp()
+    created_at = existing_sync_created_at(existing, now_stamp)
+    modified_at = now_stamp if mark_modified else existing_sync_modified_at(existing)
+
+    private_props = body.setdefault("extendedProperties", {}).setdefault("private", {})
+    private_props["syncCreatedAt"] = created_at
+    if modified_at:
+        private_props["syncModifiedAt"] = modified_at
+    else:
+        private_props.pop("syncModifiedAt", None)
+
+    body["description"] = append_sync_timestamp_section(
+        str(body.get("description") or ""),
+        cfg,
+        created_at=created_at,
+        modified_at=modified_at,
+    )
+    return body
+
+
+def needs_sync_timestamp_backfill(event: Dict[str, Any], cfg: AppConfig) -> bool:
+    if not cfg.sync.include_sync_timestamps_in_description:
+        return False
+    private_props = event_private_properties(event)
+    description = str(event.get("description") or "")
+    return not private_props.get("syncCreatedAt") or "Erstellt durch Sync:" not in description
 
 
 def booking_explicit_id(bok: Dict[str, Any]) -> str:
@@ -785,11 +1064,15 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
     # Für Termine ohne echte ID erzeugen wir pro Tag/Leistung/Raum/Mitarbeiter eine laufende Nummer.
     weak_key_counter: Dict[str, int] = {}
     candidates: List[CalendarEventCandidate] = []
+    party_filtered = 0
 
     for bok in bookings:
         if not isinstance(bok, dict):
             continue
-        form = clean_text(bok.get("form"))
+        if not party_matches_booking(bok, cfg.therapy):
+            party_filtered += 1
+            continue
+        form = booking_form(bok)
         if form not in SUPPORTED_FORMS:
             continue
         try:
@@ -819,24 +1102,29 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
         employee = clean_text(bok.get("employee"))
         coservice = clean_text(bok.get("coservice"))
         coemployee = clean_text(bok.get("coemployee"))
+        party = booking_party(bok)
+
+        form_display_name = form_label(form)
 
         explicit_id = booking_explicit_id(bok)
+        party_key_part = f"|party={party.casefold()}" if party else ""
         if explicit_id:
-            stable_material = f"plan={cfg.therapy.plan_id}|explicit|{explicit_id}"
+            stable_material = f"plan={cfg.therapy.plan_id}|explicit|{explicit_id}{party_key_part}"
         else:
-            weak_base = "|".join(
-                [
-                    f"plan={cfg.therapy.plan_id}",
-                    "weak",
-                    begin.date().isoformat(),
-                    form,
-                    service.lower(),
-                    location.lower(),
-                    employee.lower(),
-                    coservice.lower(),
-                    coemployee.lower(),
-                ]
-            )
+            weak_parts = [
+                f"plan={cfg.therapy.plan_id}",
+                "weak",
+                begin.date().isoformat(),
+                form,
+                service.lower(),
+                location.lower(),
+                employee.lower(),
+                coservice.lower(),
+                coemployee.lower(),
+            ]
+            if party:
+                weak_parts.append(f"party={party.casefold()}")
+            weak_base = "|".join(weak_parts)
             weak_key_counter[weak_base] = weak_key_counter.get(weak_base, 0) + 1
             stable_material = f"{weak_base}|occurrence={weak_key_counter[weak_base]}"
 
@@ -850,6 +1138,7 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
             "begin": begin.isoformat(),
             "end": end.isoformat(),
             "form": form,
+            "form_label": form_display_name,
             "service": service,
             "location": location,
             "employee": employee,
@@ -861,6 +1150,8 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
             "reminders": event_reminders,
             "plan_id": cfg.therapy.plan_id,
             "plan_name": cfg.therapy.display_name,
+            "party": party,
+            "party_filter": dataclasses.asdict(cfg.therapy.party_filter),
             "color_id": cfg.therapy.color_id,
         }
         signature = sha256_short(canonical_json(signature_material), 64)
@@ -881,6 +1172,10 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
                     "syncVersion": SYNC_VERSION,
                     "planId": cfg.therapy.plan_id,
                     "planName": cfg.therapy.display_name,
+                    "form": form,
+                    "formLabel": form_display_name,
+                    "party": party,
+                    "partyFilter": describe_party_filter(cfg.therapy.party_filter),
                 }
             },
         }
@@ -890,8 +1185,32 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
             body["colorId"] = cfg.therapy.color_id
         candidates.append(CalendarEventCandidate(source_key, signature, body, begin, end))
 
+    if party_filtered:
+        logging.info(
+            "Party-Filter '%s' für Quelle '%s': %s Booking(s) ausgeschlossen.",
+            describe_party_filter(cfg.therapy.party_filter),
+            cfg.therapy.display_name,
+            party_filtered,
+        )
     candidates.sort(key=lambda item: (item.begin, item.google_body.get("summary", "")))
     return candidates
+
+
+def backup_invalid_token_file(token_file: Path, reason: str) -> Path:
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = token_file.with_name(f"{token_file.name}.invalid-{timestamp}")
+    try:
+        token_file.replace(backup)
+        try:
+            os.chmod(backup, 0o600)
+        except OSError:
+            pass
+        logging.error("Ungültige Google-Token-Datei wurde gesichert: %s (%s)", backup, reason)
+        return backup
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Google token_file ist ungültig und konnte nicht verschoben werden: {token_file} ({exc})"
+        ) from exc
 
 
 def get_google_service(
@@ -901,12 +1220,42 @@ def get_google_service(
     auth_bind_addr: Optional[str] = None,
     auth_port: int = 0,
     open_browser: bool = True,
+    force_oauth: bool = False,
 ):
     token_file = cfg.google.token_file
     creds: Optional[Credentials] = None
 
-    if token_file.exists():
-        creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+    if token_file.exists() and not force_oauth:
+        try:
+            if token_file.stat().st_size == 0:
+                raise json.JSONDecodeError("empty token file", "", 0)
+            creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+        except json.JSONDecodeError as exc:
+            backup = backup_invalid_token_file(token_file, str(exc))
+            raise RuntimeError(
+                "Google token_file ist leer oder kein gültiges JSON. "
+                f"Beschädigte Datei wurde gesichert als {backup}. "
+                "Bitte Google OAuth neu initialisieren: ./scripts/init-google-auth.sh"
+            ) from exc
+        except ValueError as exc:
+            backup = backup_invalid_token_file(token_file, str(exc))
+            raise RuntimeError(
+                "Google token_file enthält kein gültiges OAuth-Token. "
+                f"Beschädigte Datei wurde gesichert als {backup}. "
+                "Bitte Google OAuth neu initialisieren: ./scripts/init-google-auth.sh"
+            ) from exc
+
+    if token_file.exists() and force_oauth:
+        try:
+            if token_file.stat().st_size == 0:
+                backup_invalid_token_file(token_file, "empty token file")
+            else:
+                # Bei auth-only bewusst neu anmelden; eine vorhandene Datei bleibt erhalten,
+                # sofern sie nicht beschädigt ist.
+                creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+        except Exception as exc:  # noqa: BLE001
+            backup_invalid_token_file(token_file, str(exc))
+            creds = None
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -1156,7 +1505,8 @@ def sync_to_google(plan: Dict[str, Any], cfg: AppConfig, state: Dict[str, Any]) 
             existing = existing_by_key.get(candidate.source_key)
             try:
                 if existing is None:
-                    created = insert_event(service, cfg, candidate, calendar_id)
+                    write_body = body_with_sync_timestamps(candidate, cfg)
+                    created = insert_event(service, cfg, dataclasses.replace(candidate, google_body=write_body), calendar_id)
                     existing_by_key[candidate.source_key] = created
                     stats["created"] = int(stats.get("created", 0)) + 1
                     calendar_stats["created"] = int(calendar_stats.get("created", 0)) + 1
@@ -1166,13 +1516,19 @@ def sync_to_google(plan: Dict[str, Any], cfg: AppConfig, state: Dict[str, Any]) 
                     logging.info("Erstellt in %s: %s", calendar_id, candidate.google_body.get("summary"))
                 else:
                     if event_signature(existing) == candidate.source_signature:
+                        if needs_sync_timestamp_backfill(existing, cfg):
+                            write_body = body_with_sync_timestamps(candidate, cfg, existing=existing, mark_modified=False)
+                            patched = patch_event(service, cfg, existing["id"], dataclasses.replace(candidate, google_body=write_body), calendar_id)
+                            existing_by_key[candidate.source_key] = patched
+                            logging.info("Sync-Zeitstempel ergänzt in %s: %s", calendar_id, candidate.google_body.get("summary"))
                         stats["unchanged"] = int(stats.get("unchanged", 0)) + 1
                         calendar_stats["unchanged"] = int(calendar_stats.get("unchanged", 0)) + 1
                     else:
                         detail = _event_detail_from_candidate(cfg, "updated", candidate)
                         _add_update_diff(detail, existing, candidate, cfg)
                         detail.setdefault("calendar_ids", []).append(calendar_id)
-                        patched = patch_event(service, cfg, existing["id"], candidate, calendar_id)
+                        write_body = body_with_sync_timestamps(candidate, cfg, existing=existing, mark_modified=True)
+                        patched = patch_event(service, cfg, existing["id"], dataclasses.replace(candidate, google_body=write_body), calendar_id)
                         existing_by_key[candidate.source_key] = patched
                         stats["updated"] = int(stats.get("updated", 0)) + 1
                         calendar_stats["updated"] = int(calendar_stats.get("updated", 0)) + 1
@@ -1819,6 +2175,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 auth_bind_addr=args.auth_bind_addr,
                 auth_port=args.auth_port,
                 open_browser=False,
+                force_oauth=True,
             )
             logging.info("Google OAuth abgeschlossen. Token-Datei: %s", cfg.google.token_file)
             return 0
@@ -1832,12 +2189,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         for therapy_source in cfg.plans:
             plan_cfg = config_for_plan(cfg, therapy_source)
             logging.info(
-                "Synchronisiere Quelle '%s' (id=%s, source=%s, colorId=%s, Kalender=%s, reminder=%s)",
+                "Synchronisiere Quelle '%s' (id=%s, source=%s, colorId=%s, Kalender=%s, party=%s, reminder=%s)",
                 therapy_source.display_name,
                 therapy_source.plan_id,
                 therapy_source.source_name,
                 therapy_source.color_id or "<Standard>",
                 ", ".join(config_for_plan(cfg, therapy_source).google.calendar_ids),
+                describe_party_filter(therapy_source.party_filter),
                 (f"{therapy_source.reminder_minutes} min" if therapy_source.reminder_minutes is not None else (f"{cfg.sync.reminder_minutes} min" if cfg.sync.reminder_minutes is not None else "Kalenderstandard")),
             )
             try:
