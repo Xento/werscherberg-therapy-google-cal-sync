@@ -1,38 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
 docker compose --profile tools run --rm --entrypoint python test-notification - <<'PY'
-import os
-import re
-import sys
+from pathlib import Path
+from therapieplan_sync import load_config
 
-required = ["PUSHOVER_ENABLED", "PUSHOVER_TOKEN", "PUSHOVER_USER"]
-print("Pushover-Konfiguration im Container:")
-for name in required + ["PUSHOVER_DEVICE", "PUSHOVER_PRIORITY", "PUSHOVER_SOUND", "NOTIFICATIONS_ENABLED"]:
-    value = os.environ.get(name, "")
-    if name in {"PUSHOVER_TOKEN", "PUSHOVER_USER"}:
-        shown = "<leer>" if not value else f"{value[:4]}...{value[-4:]} ({len(value)} Zeichen)"
-    else:
-        shown = value if value else "<leer>"
-    print(f"  {name}={shown}")
-
+cfg = load_config(Path('/app/data/config.yaml'))
+po = cfg.notifications.pushover
 errors = []
-if os.environ.get("PUSHOVER_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
-    errors.append("PUSHOVER_ENABLED ist nicht aktiv. Erwartet: PUSHOVER_ENABLED=1")
-for name in ["PUSHOVER_TOKEN", "PUSHOVER_USER"]:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        errors.append(f"{name} fehlt.")
-    elif not re.fullmatch(r"[A-Za-z0-9]{30}", value):
-        errors.append(f"{name} sieht formal falsch aus. Erwartet: 30 alphanumerische Zeichen.")
-priority = os.environ.get("PUSHOVER_PRIORITY", "0").strip() or "0"
-if priority == "2":
-    errors.append("PUSHOVER_PRIORITY=2 ist Emergency Priority und benötigt retry/expire; verwende hier zunächst 0 oder 1.")
+
+print('Pushover-Konfiguration:')
+print(f'  notifications.enabled = {cfg.notifications.enabled}')
+print(f'  pushover.enabled      = {po.get("enabled")}')
+print(f'  token                 = {po.get("token", "")[:4]}...{po.get("token", "")[-4:] if po.get("token") else ""}' if po.get('token') else '  token                 = <leer>')
+print(f'  user                  = {po.get("user", "")[:4]}...{po.get("user", "")[-4:] if po.get("user") else ""}' if po.get('user') else '  user                  = <leer>')
+print(f'  device                = {po.get("device") or "<alle>"}')
+print(f'  level0                = priority={cfg.notifications.level0_priority}, sound={cfg.notifications.level0_sound}')
+print(f'  level1                = priority={cfg.notifications.level1_priority}, sound={cfg.notifications.level1_sound}')
+print(f'  level2                = priority={cfg.notifications.level2_priority}, sound={cfg.notifications.level2_sound}, retry={cfg.notifications.level2_retry}, expire={cfg.notifications.level2_expire}')
+
+if not cfg.notifications.enabled:
+    errors.append('notifications.enabled ist false.')
+if not po.get('enabled'):
+    errors.append('notifications.providers.pushover.enabled ist false.')
+if not po.get('token'):
+    errors.append('Pushover token fehlt. Setze PUSHOVER_TOKEN in .env oder token in config.yaml.')
+if not po.get('user'):
+    errors.append('Pushover user fehlt. Setze PUSHOVER_USER in .env oder user in config.yaml.')
+if int(cfg.notifications.level2_priority) == 2 and (int(cfg.notifications.level2_retry) < 30 or int(cfg.notifications.level2_expire) <= 0):
+    errors.append('Pushover Priority 2 benötigt retry >= 30 und expire > 0.')
+
 if errors:
-    print("\nAuffälligkeiten:")
-    for item in errors:
-        print(f"  - {item}")
-    sys.exit(2)
-print("\nGrundkonfiguration sieht plausibel aus. Starte jetzt ./scripts/test-notification.sh für den echten Versandtest.")
+    print('\nFehler/Hinweise:')
+    for error in errors:
+        print(f'  - {error}')
+    raise SystemExit(1)
+
+print('\nPushover-Konfiguration sieht plausibel aus.')
 PY

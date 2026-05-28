@@ -112,6 +112,14 @@ sync:
   include_details_in_description: true
   include_sync_timestamps_in_description: true
 
+  # Matching für vorhandene Google-Termine ohne echte Backend-ID.
+  # true = Wenn sich z. B. nur Raum oder Mitarbeiter ändert, wird ein bestehender
+  # Termin anhand mehrerer Kriterien als derselbe Termin erkannt und aktualisiert,
+  # statt einen zweiten Termin anzulegen.
+  match_existing_events: true
+  match_time_tolerance_minutes: 90
+  match_min_score: 8
+
   # default = normale Kalendersichtbarkeit verwenden
   # private = privat
   # public = öffentlich

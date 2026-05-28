@@ -1,282 +1,127 @@
 # Konfiguration
 
-Die Konfiguration besteht aus zwei Dateien:
+## Grundprinzip
 
-```text
-.env
- data/config.yaml
-```
+Die Konfiguration ist in zwei Dateien getrennt:
 
-`.env` enthält Betriebsparameter und Secrets für Pushdienste. `data/config.yaml` enthält Therapieplanquellen, Kalenderziele und Sync-Verhalten.
+| Datei | Zweck |
+|---|---|
+| `.env` | Container-/OAuth-Werte und Secrets |
+| `data/config.yaml` | Fachliche Sync-Konfiguration |
 
-## 1. `.env`
+In `.env` sollen nur Werte stehen, die nicht sinnvoll in Git gehören oder schon vor dem Start des Containers benötigt werden, z. B. Pushover-Token und OAuth-Port. Alles andere gehört in `data/config.yaml`.
 
-### Zeitsteuerung
+## `.env`
+
+Minimale `.env`:
 
 ```env
 TZ=Europe/Berlin
-SYNC_TIMES=06:00,12:00,18:00,22:00
-RUN_ON_START=0
-```
+VERBOSE=0
 
-`SYNC_TIMES` definiert bis zu vier Sync-Zeitpunkte pro Tag. Format:
+PUSHOVER_TOKEN=
+PUSHOVER_USER=
+PUSHOVER_DEVICE=
 
-```text
-HH:MM
-HH:MM:SS
-```
+HOMEASSISTANT_TOKEN=
 
-Beispiele:
-
-```env
-SYNC_TIMES=07:00,11:30,16:00,21:00
-SYNC_TIMES=06:15,12:15,18:15,22:15
-```
-
-`RUN_ON_START=1` führt direkt beim Containerstart zusätzlich einen Sync aus.
-
-### Neuversuche nach Sync-Zeitpunkten
-
-```env
-SYNC_RETRY_ENABLED=1
-SYNC_RETRY_MAX_ATTEMPTS=3
-SYNC_RETRY_DELAY_SECONDS=300
-SYNC_RETRY_WHEN_NO_CHANGES=1
-SYNC_RETRY_WHEN_ERRORS=1
-SYNC_STATS_FILE=/app/data/last_sync_stats.json
-```
-
-Bedeutung:
-
-| Variable | Bedeutung | Standard |
-|---|---|---:|
-| `SYNC_RETRY_ENABLED` | Neuversuche aktivieren/deaktivieren | `1` |
-| `SYNC_RETRY_MAX_ATTEMPTS` | Anzahl zusätzlicher Versuche nach dem ersten Lauf | `3` |
-| `SYNC_RETRY_DELAY_SECONDS` | Abstand zwischen den Neuversuchen in Sekunden | `300` |
-| `SYNC_RETRY_WHEN_NO_CHANGES` | Neuversuch, wenn keine Kalenderänderung erkannt wurde | `1` |
-| `SYNC_RETRY_WHEN_ERRORS` | Neuversuch bei Fehlern oder Teilfehlern | `1` |
-| `SYNC_STATS_FILE` | interne JSON-Statistik für den Daemon | `/app/data/last_sync_stats.json` |
-
-Beispiel: Bei `SYNC_TIMES=06:00,12:00,18:00,22:00` und den Standardwerten läuft ein geplanter Sync um 06:00. Wenn keine neuen/geänderten/gelöschten Termine erkannt wurden oder ein Fehler auftrat, folgen bis zu drei Neuversuche um 06:05, 06:10 und 06:15.
-
-### Google OAuth Redirect
-
-Browser auf demselben Host:
-
-```env
 GOOGLE_AUTH_HOST=localhost
 GOOGLE_AUTH_BIND_ADDR=0.0.0.0
 GOOGLE_AUTH_PORT=6080
 GOOGLE_AUTH_PUBLISH_ADDR=127.0.0.1
 ```
 
-Browser auf anderem Rechner im LAN:
+## `data/config.yaml`
 
-```env
-GOOGLE_AUTH_HOST=192.0.2.10
-GOOGLE_AUTH_BIND_ADDR=0.0.0.0
-GOOGLE_AUTH_PORT=6080
-GOOGLE_AUTH_PUBLISH_ADDR=0.0.0.0
-```
-
-### Pushbenachrichtigung allgemein
-
-```env
-NOTIFICATIONS_ENABLED=1
-NOTIFY_ON_CHANGES=1
-NOTIFY_ON_ERRORS=1
-NOTIFY_ON_SUCCESS_NO_CHANGES=1
-NOTIFICATION_TITLE_PREFIX=Therapieplan
-NOTIFY_INCLUDE_CHANGE_DETAILS=1
-NOTIFY_MAX_CHANGE_ITEMS=12
-NOTIFY_MAX_MESSAGE_CHARS=950
-```
-
-### Drei Pushover-Stufen
-
-```env
-NOTIFY_INTENSE_SAME_DAY_CHANGES=1
-NOTIFY_INTENSE_NEXT_SYNC_WINDOW_CHANGES=1
-```
-
-| Stufe | Bedeutung |
-|---:|---|
-| 0 | Änderung betrifft spätere Tage |
-| 1 | Änderung betrifft den aktuellen Kalendertag |
-| 2 | Änderung betrifft das nächste Zeitfenster bis zum nächsten Sync-Zeitpunkt |
-
-Beispiel bei `SYNC_TIMES=06:00,12:00,18:00,22:00`:
-
-| Lauf | Stufe-2-Zeitfenster |
-|---|---|
-| 06:00 | 06:00 bis 12:00 |
-| 12:00 | 12:00 bis 18:00 |
-| 18:00 | 18:00 bis 22:00 |
-| 22:00 | 22:00 bis 06:00 am Folgetag |
-
-Pushover je Stufe:
-
-```env
-PUSHOVER_LEVEL0_PRIORITY=0
-PUSHOVER_LEVEL0_SOUND=pushover
-PUSHOVER_LEVEL0_RETRY=60
-PUSHOVER_LEVEL0_EXPIRE=1800
-
-PUSHOVER_LEVEL1_PRIORITY=1
-PUSHOVER_LEVEL1_SOUND=persistent
-PUSHOVER_LEVEL1_RETRY=60
-PUSHOVER_LEVEL1_EXPIRE=1800
-
-PUSHOVER_LEVEL2_PRIORITY=2
-PUSHOVER_LEVEL2_SOUND=echo
-PUSHOVER_LEVEL2_RETRY=60
-PUSHOVER_LEVEL2_EXPIRE=1800
-```
-
-Pushover `priority=2` ist Emergency und benötigt `retry` und `expire`. Die Pushover-API beschreibt diese Parameter hier: <https://pushover.net/api>
-
-### Pushover Zugangsdaten
-
-```env
-PUSHOVER_ENABLED=1
-PUSHOVER_TOKEN=dein_application_api_token
-PUSHOVER_USER=dein_user_key
-PUSHOVER_DEVICE=
-```
-
-- `PUSHOVER_TOKEN`: Application/API Token
-- `PUSHOVER_USER`: User Key
-- `PUSHOVER_DEVICE`: optional; leer = alle Geräte
-
-### Home Assistant
-
-```env
-HOMEASSISTANT_ENABLED=0
-HOMEASSISTANT_URL=http://homeassistant.local:8123
-HOMEASSISTANT_TOKEN=
-HOMEASSISTANT_NOTIFY_SERVICE=mobile_app_dein_handy
-```
-
-Bei Home Assistant Companion App heißen Notify-Services typischerweise `notify.mobile_app_<device_id>` oder im Skript kurz `mobile_app_<device_id>`.
-
-## 2. `data/config.yaml`
-
-### Globale Therapieplan-Defaults
+### Scheduler und Retries
 
 ```yaml
-therapy:
-  request_timeout_seconds: 30
-  verify_tls: true
-  user_agent: "therapieplan-calendar-sync/1.5"
+scheduler:
+  sync_times:
+    - "07:30"
+    - "10:00"
+    - "12:00"
+    - "18:00"
+  run_on_start: false
+  retry:
+    enabled: true
+    max_attempts: 15
+    delay_seconds: 60
+    when_no_changes: true
+    when_errors: true
+    stats_file: "last_sync_stats.json"
 ```
 
-### Mehrere Therapiepläne
+`sync_times` steuert den dauerhaft laufenden Container. `run-once.sh` nutzt weiterhin einen manuellen Einmallauf.
+
+Bei Retry-Läufen wegen „keine Änderungen“ wird die „keine Änderungen“-Pushmeldung unterdrückt. Eine Pushmeldung kommt bei Retry nur bei echten Änderungen oder Fehlern.
+
+### Therapiepläne
 
 ```yaml
 therapy_plans:
   - id: "person-1"
     name: "Person 1"
-    url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/DEIN_TOKEN_1/"
+    url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/REPLACE_ME/"
     birth_date: "TT.MM.JJJJ"
-    access_token: ""
     color_id: "6"
     event_prefix: ""
-
-  - id: "person-2"
-    name: "Person 2"
-    url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/DEIN_TOKEN_2/"
-    birth_date: "TT.MM.JJJJ"
-    access_token: ""
-    color_id: "10"
-    event_prefix: ""
+    party_filter: "all"
+    calendar_ids:
+      - "primary"
 ```
 
-`id` muss stabil bleiben. Wenn du die `id` änderst, erkennt der Sync alte Termine nicht mehr als eigene Termine und kann Duplikate erzeugen.
+Wichtige Felder:
+
+| Feld | Bedeutung |
+|---|---|
+| `id` | stabile technische ID für Sync-Zuordnung |
+| `name` | Anzeigename in Logs/Pushmeldungen |
+| `url` | vollständige Therapieplan-URL inklusive abschließendem `/` |
+| `birth_date` | Geburtsdatum im Format `TT.MM.JJJJ` |
+| `color_id` | Google-Event-Farbe |
+| `party_filter` | Filter für Mehrpersonen-JSON |
+| `calendar_ids` | Zielkalender nur für diesen Plan |
 
 ### Party-Filter
-
-Neuere Therapieplan-JSONs können mehrere Parteien in derselben Antwort enthalten. Das Feld `party` unterscheidet dabei die Zuordnung:
-
-- `party: ""` = Termine ohne benannte Party, typischerweise Eltern-/Begleitpersonen-Termine
-- `party: "Person 1"` = Termine dieser benannten Party
-
-Ohne Filter werden alle passenden Termine übernommen:
 
 ```yaml
 party_filter: "all"
 ```
 
-Nur Eltern-/Begleitpersonen-Termine mit leerer `party` übernehmen:
+Importiert alle Termine.
 
 ```yaml
 party_filter: "empty"
 ```
 
-Nur Termine mit gesetzter Party übernehmen:
+Importiert nur Termine mit leerer `party`, typischerweise Eltern-/Begleitpersonen-Termine.
 
 ```yaml
 party_filter: "non_empty"
 ```
 
-Nur eine konkrete Party übernehmen:
-
-```yaml
-party_filter:
-  include: ["Person 1"]
-```
-
-Mehrere Parteien übernehmen, inklusive leerer Party:
+Importiert nur Termine mit gesetzter `party`.
 
 ```yaml
 party_filter:
   include:
-    - ""
     - "Person 1"
 ```
 
-Alles außer einer bestimmten Party übernehmen:
+Importiert nur Termine dieser Party.
 
 ```yaml
 party_filter:
-  exclude: ["Person 1"]
+  exclude:
+    - "Person 1"
 ```
 
-Kurzformen sind ebenfalls möglich:
+Importiert alles außer dieser Party.
 
-```yaml
-party: "Person 1"
-parties: ["", "Person 1"]
-```
+### Zielkalender
 
-### Farben
-
-```yaml
-color_id: "6"
-```
-
-| ID | Name | Farbe |
-|---:|---|---|
-| 1 | lavender | Lavendel / helles Lila |
-| 2 | sage | Salbei / helles Grün |
-| 3 | grape | Violett |
-| 4 | flamingo | Rosa / Pink |
-| 5 | banana | Gelb |
-| 6 | tangerine | Orange |
-| 7 | peacock | Türkis / Cyan |
-| 8 | graphite | Grau |
-| 9 | blueberry | Blau |
-| 10 | basil | Grün |
-| 11 | tomato | Rot |
-
-Auch Namen sind möglich:
-
-```yaml
-color_id: "blueberry"
-```
-
-### Zielkalender global
-
-Ein Kalender:
+Globaler Fallback:
 
 ```yaml
 google:
@@ -284,84 +129,45 @@ google:
     - "primary"
 ```
 
-Mehrere Kalender:
-
-```yaml
-google:
-  calendar_ids:
-    - "primary"
-    - "abcdef1234567890@group.calendar.google.com"
-```
-
-### Zielkalender pro Plan
-
-Wenn ein Plan eigene `calendar_ids` hat, überschreibt diese Liste die globale Google-Liste:
+Plan-spezifisch:
 
 ```yaml
 therapy_plans:
   - id: "person-1"
-    name: "Person 1"
     calendar_ids:
-      - "person-1-kalender@group.calendar.google.com"
-
-  - id: "person-2"
-    name: "Person 2"
-    calendar_ids:
-      - "primary"
-      - "person-2-kalender@group.calendar.google.com"
+      - "abcdef1234567890@group.calendar.google.com"
 ```
 
-### Sync-Verhalten
+Wenn `therapy_plans[].calendar_ids` gesetzt ist, überschreibt es `google.calendar_ids` für diesen Plan.
+
+### Darstellung der Google-Termine
 
 ```yaml
 sync:
-  state_file: "state.json"
-  source_name: "therapieplan-sync"
-  include_past_days: 0
-  delete_missing_future: true
-  dry_run: false
-  include_details_in_description: true
-  include_sync_timestamps_in_description: true
   visibility: "default"
   transparency: "opaque"
+  include_details_in_description: true
+  include_sync_timestamps_in_description: true
 ```
 
-Wichtige Werte:
+`visibility: "default"` legt Termine nicht als vertraulich an.
 
-| Option | Bedeutung |
-|---|---|
-| `include_past_days` | wie viele vergangene Tage berücksichtigt werden |
-| `delete_missing_future` | zukünftige Termine löschen, wenn sie nicht mehr im Plan stehen |
-| `include_details_in_description` | Details in Terminbeschreibung übernehmen |
-| `include_sync_timestamps_in_description` | Sync-Erstell-/Änderungszeit in der Terminbeschreibung anzeigen |
-| `visibility` | `default`, `public`, `private`, `confidential` |
-| `transparency` | `opaque` = blockt Zeit, `transparent` = blockt nicht |
+### Matching vorhandener Termine
 
-Für nicht vertrauliche normale Einträge:
+Wenn das Backend keine echte Termin-ID liefert, erzeugt der Sync eine eigene interne Kennung. Damit Änderungen an Raum oder Mitarbeiter nicht als neuer Termin plus gelöschter Termin erscheinen, gibt es eine zweite Matching-Stufe:
 
 ```yaml
-visibility: "default"
+sync:
+  match_existing_events: true
+  match_time_tolerance_minutes: 90
+  match_min_score: 8
 ```
 
-Sync-Zeitstempel in der Beschreibung:
+Die Logik prüft mehrere Kriterien, u. a. Tag, Uhrzeit, Dauer, Titel, Terminart, Party und Ort. Wenn genug Kriterien übereinstimmen, wird der vorhandene Google-Termin aktualisiert und bekommt den neuen `sourceKey`.
 
-```yaml
-include_sync_timestamps_in_description: true
-```
-
-Damit schreibt der Sync in den Google-Termin z. B.:
-
-```text
-Sync-Informationen:
-Erstellt durch Sync: 27.05.2026 21:55:00 CEST
-Zuletzt geändert durch Sync: 28.05.2026 07:35:00 CEST
-```
-
-Die Zeitstempel werden nicht in die fachliche Änderungs-Signatur aufgenommen. Dadurch erzeugt ein unveränderter Termin nicht bei jedem Lauf erneut eine Änderung.
+Wichtig: Raum und Mitarbeiter sind Teil der Änderungsprüfung, aber nicht mehr Teil der stabilen Termin-Identität. Dadurch werden Änderungen an diesen Feldern korrekt als `updated` erkannt.
 
 ### Erinnerungen
-
-Zwei Popup-Erinnerungen 20 und 10 Minuten vorher:
 
 ```yaml
 sync:
@@ -374,16 +180,9 @@ sync:
         minutes: 10
 ```
 
-Mögliche Methoden:
+Mögliche Methoden sind `popup` und `email`.
 
-```yaml
-method: "popup"
-method: "email"
-```
-
-Google Calendar API unterstützt Reminder-Overrides mit `email` und `popup` sowie Minutenwerten zwischen 0 und 40320. Siehe Event-Resource-Dokumentation: <https://developers.google.com/workspace/calendar/api/v3/reference/events>
-
-### Benachrichtigungskonfiguration in YAML
+### Benachrichtigungen
 
 ```yaml
 notifications:
@@ -396,35 +195,50 @@ notifications:
   include_change_details: true
   max_change_items: 12
   max_message_chars: 950
+```
+
+### Pushover
+
+```yaml
+notifications:
+  providers:
+    pushover:
+      enabled: true
+      token: ""   # besser in .env: PUSHOVER_TOKEN
+      user: ""    # besser in .env: PUSHOVER_USER
+      device: ""  # optional in .env: PUSHOVER_DEVICE
+      priority: 0
+      sound: "pushover"
+```
+
+### Drei Pushover-Stufen
+
+```yaml
+notifications:
   intense_same_day_changes: true
   intense_next_sync_window_changes: true
+  pushover_levels:
+    level0_future:
+      priority: 0
+      sound: "incoming"
+      retry: 60
+      expire: 1800
+    level1_same_day:
+      priority: 1
+      sound: "echo"
+      retry: 60
+      expire: 1800
+    level2_next_window:
+      priority: 2
+      sound: "echo"
+      retry: 60
+      expire: 1800
 ```
 
-Werte aus `.env` überschreiben die meisten Provider-/Betriebswerte und sind für Secrets vorzuziehen.
+Stufe 2 gewinnt vor Stufe 1, Stufe 1 gewinnt vor Stufe 0.
 
-## Terminart
+## Legacy `.env`-Variablen
 
-Wenn `sync.include_details_in_description: true` gesetzt ist, schreibt der Sync die Terminart zusätzlich in die Google-Terminbeschreibung, z. B.:
+Aus Kompatibilitätsgründen werden alte `.env`-Variablen wie `SYNC_TIMES`, `NOTIFICATIONS_ENABLED` oder `PUSHOVER_LEVEL2_SOUND` weiterhin gelesen, wenn die entsprechenden neuen Werte in `data/config.yaml` fehlen.
 
-```text
-Terminart: Gruppentermin (G)
-```
-
-Zusätzlich werden nur diese maschinenlesbaren Werte in `extendedProperties.private` des Google-Termins gespeichert:
-
-| Feld | Bedeutung |
-|---|---|
-| `form` | Rohwert aus dem Therapieplan, z. B. `E`, `G`, `C` |
-| `formLabel` | lesbare Terminart, z. B. `Gruppentermin` |
-
-Unterstützte Terminformen:
-
-| Form | Bedeutung |
-|---|---|
-| `V` | Termin |
-| `A` | allgemeiner Termin |
-| `E` | Einzeltermin |
-| `C` | kombinierter Termin / Co-Therapie |
-| `G` | Gruppentermin |
-
-`form: 1` wird als Hinweis-/Leereintrag behandelt und nicht importiert. Einträge mit gesetztem Hidden-Flag `0x20000000` werden ebenfalls nicht importiert.
+Für neue Installationen sollten diese Werte aber in `data/config.yaml` stehen.

@@ -88,14 +88,82 @@ Die Datei muss exakt so heißen:
 data/credentials.json
 ```
 
+
+## `token.json` prüfen
+
+Wenn der Google-Login oder der Sync mit Token-/JSON-Fehlern fehlschlägt:
+
+```bash
+./scripts/check-google-token.sh
+```
+
+Das Skript prüft:
+
+- ob `data/credentials.json` vorhanden und gültig ist
+- ob `data/token.json` vorhanden ist
+- ob `data/token.json` gültiges JSON ist
+- ob die erwarteten OAuth-Felder enthalten sind
+- ob ein Refresh Token vorhanden ist
+
+Bei beschädigter `token.json`:
+
+```bash
+./scripts/repair-google-token.sh
+./scripts/init-google-auth.sh
+./scripts/run-once.sh
+```
+
 ## `token.json` wird nicht erzeugt
 
 Prüfen:
 
 - OAuth-Link wurde geöffnet?
-- Browser konnte zurück auf `http://<host>:6080/`?
-- Port im Netzwerk erreichbar?
 - Container läuft noch?
+- Port `6080` ist erreichbar?
+- `GOOGLE_AUTH_HOST` steht auf `localhost`?
+
+Wenn Browser und Docker-Host nicht derselbe Rechner sind, gibt es zwei saubere Wege:
+
+### Variante A: SSH-Tunnel
+
+```bash
+ssh -L 6080:127.0.0.1:6080 benutzer@DOCKER_HOST_IP
+```
+
+Danach den OAuth-Link mit `http://localhost:6080/` im Browser öffnen.
+
+### Variante B: localhost im finalen Redirect manuell ersetzen
+
+`.env`:
+
+```env
+GOOGLE_AUTH_HOST=localhost
+GOOGLE_AUTH_BIND_ADDR=0.0.0.0
+GOOGLE_AUTH_PORT=6080
+GOOGLE_AUTH_PUBLISH_ADDR=0.0.0.0
+```
+
+Nach der Google-Anmeldung leitet der Browser auf eine URL wie diese um:
+
+```text
+http://localhost:6080/?state=...&code=...
+```
+
+Wenn der Browser auf einem anderen Rechner läuft, ändere nur den Hostnamen:
+
+```text
+http://DOCKER_HOST_IP:6080/?state=...&code=...
+```
+
+Pfad und Query müssen unverändert bleiben.
+
+Nicht setzen:
+
+```env
+GOOGLE_AUTH_HOST=192.168.x.x
+```
+
+Das kann von Google als private-IP-Redirect abgelehnt werden.
 
 Logs:
 
@@ -314,4 +382,85 @@ Dann wird auch bei einem erfolgreichen Lauf ohne Kalenderänderungen erneut vers
 ```env
 SYNC_RETRY_WHEN_NO_CHANGES=0
 SYNC_RETRY_WHEN_ERRORS=1
+```
+
+
+## Mehrfache Pushmeldungen bei Retry-Läufen ohne Änderungen
+
+Bei aktivem `SYNC_RETRY_WHEN_NO_CHANGES=1` startet der Container nach einem geplanten Lauf weitere Abrufe, wenn keine Kalenderänderung erkannt wurde. Ab Version 1.9 wird die reine Erfolgsmeldung „keine Änderungen“ bei diesen Retry-Läufen automatisch unterdrückt.
+
+Verhalten:
+
+```text
+Geplanter Lauf ohne Änderungen  -> Push, wenn NOTIFY_ON_SUCCESS_NO_CHANGES=1
+Retry ohne Änderungen           -> kein Push
+Retry mit neuer/geänderter/gelöschter Änderung -> Push
+Retry mit Fehler                -> Push, wenn NOTIFY_ON_ERRORS=1
+```
+
+Wenn trotzdem bei jedem Retry eine Erfolgsmeldung kommt, läuft wahrscheinlich noch ein altes Image. Dann neu bauen:
+
+```bash
+docker compose build --no-cache therapieplan-sync
+./scripts/stop.sh
+./scripts/start.sh
+```
+
+## Neue Config-Struktur: Wert greift nicht
+
+Ab der umgebauten Konfiguration gilt:
+
+- Scheduler, Retries, Pushregeln, Pushover-Level, Kalender und Therapiepläne stehen in `data/config.yaml`.
+- `.env` enthält nur noch Secrets und technische Container-/OAuth-Werte.
+
+Wenn ein Wert nicht wie erwartet greift:
+
+```bash
+grep -n "scheduler:\|notifications:\|pushover_levels:\|therapy_plans:" data/config.yaml
+```
+
+Alte `.env`-Variablen werden nur noch als Legacy-Fallback genutzt, wenn der entsprechende Wert in `data/config.yaml` fehlt. Für neue Installationen sollten diese Werte nicht mehr in `.env` gepflegt werden.
+
+## Pushover-Test nutzt falsche Stufe
+
+Die Stufen werden aus `data/config.yaml` gelesen:
+
+```yaml
+notifications:
+  pushover_levels:
+    level0_future:
+      priority: 0
+      sound: "incoming"
+    level1_same_day:
+      priority: 1
+      sound: "echo"
+    level2_next_window:
+      priority: 2
+      sound: "echo"
+```
+
+Test:
+
+```bash
+./scripts/test-pushover-levels.sh
+```
+
+## Sync läuft nicht zu den erwarteten Zeiten
+
+Die Zeiten stehen jetzt hier:
+
+```yaml
+scheduler:
+  sync_times:
+    - "07:30"
+    - "10:00"
+    - "12:00"
+    - "18:00"
+```
+
+Danach Container neu starten:
+
+```bash
+./scripts/stop.sh
+./scripts/start.sh
 ```

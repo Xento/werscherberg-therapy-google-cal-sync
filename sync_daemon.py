@@ -8,12 +8,112 @@ import os
 import signal
 import subprocess
 import sys
+
+import yaml
 import time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 STOP = False
+
+_MISSING = object()
+
+
+def _config_value(mapping: dict[str, Any], key: str, default: Any = None) -> Any:
+    if isinstance(mapping, dict) and key in mapping:
+        return mapping.get(key)
+    return default
+
+
+def _env_value(name: str, default: Any = _MISSING) -> Any:
+    value = os.environ.get(name)
+    if value is None:
+        if default is _MISSING:
+            return None
+        return default
+    return value
+
+
+def _bool_value(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_value(value: Any, default: int, *, minimum: int | None = None) -> int:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None and result < minimum:
+        return default
+    return result
+
+
+def _read_yaml_file(path: Path) -> dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Config-Datei konnte nicht gelesen werden: %s (%s)", path, exc)
+        return {}
+
+
+def _runtime_settings(config_file: str) -> dict[str, Any]:
+    """Load scheduler/runtime settings.
+
+    New config model:
+      - scheduler.* in config.yaml is the primary source for scheduler/retry behavior.
+      - .env remains for technical container values, secrets, and backward compatibility.
+    """
+    data = _read_yaml_file(Path(config_file))
+    scheduler = data.get("scheduler") or {}
+    if not isinstance(scheduler, dict):
+        scheduler = {}
+    retry = scheduler.get("retry") or {}
+    if not isinstance(retry, dict):
+        retry = {}
+
+    raw_times = _config_value(scheduler, "sync_times")
+    if raw_times is None:
+        raw_times = _env_value("SYNC_TIMES", "07:30,10:00,12:00,18:00")
+    if isinstance(raw_times, (list, tuple)):
+        schedule_raw = ",".join(str(item).strip() for item in raw_times if str(item).strip())
+    else:
+        schedule_raw = str(raw_times or "").strip()
+
+    # Environment values are retained as fallback only when scheduler.* is absent.
+    run_on_start = _bool_value(_config_value(scheduler, "run_on_start", _env_value("RUN_ON_START")), False)
+    retry_enabled = _bool_value(_config_value(retry, "enabled", _env_value("SYNC_RETRY_ENABLED")), True)
+    retry_max_attempts = _int_value(_config_value(retry, "max_attempts", _env_value("SYNC_RETRY_MAX_ATTEMPTS")), 3, minimum=0)
+    retry_delay_seconds = _int_value(_config_value(retry, "delay_seconds", _env_value("SYNC_RETRY_DELAY_SECONDS")), 300, minimum=1)
+    retry_when_no_changes = _bool_value(_config_value(retry, "when_no_changes", _env_value("SYNC_RETRY_WHEN_NO_CHANGES")), True)
+    retry_when_errors = _bool_value(_config_value(retry, "when_errors", _env_value("SYNC_RETRY_WHEN_ERRORS")), True)
+    stats_file_raw = _config_value(retry, "stats_file", _env_value("SYNC_STATS_FILE", "/app/data/last_sync_stats.json"))
+    stats_file = Path(str(stats_file_raw))
+    if not stats_file.is_absolute():
+        stats_file = Path(config_file).resolve().parent / stats_file
+
+    return {
+        "schedule_raw": schedule_raw,
+        "run_on_start": run_on_start,
+        "retry_enabled": retry_enabled,
+        "retry_max_attempts": retry_max_attempts,
+        "retry_delay_seconds": retry_delay_seconds,
+        "retry_when_no_changes": retry_when_no_changes,
+        "retry_when_errors": retry_when_errors,
+        "stats_file": stats_file,
+    }
+
 
 
 def _handle_stop(signum, frame):  # noqa: ANN001
@@ -144,6 +244,8 @@ def run_sync(
     window_start: dt.datetime | None = None,
     window_end: dt.datetime | None = None,
     stats_file: Path | None = None,
+    retry_attempt: int = 0,
+    suppress_no_change_notification: bool = False,
 ) -> tuple[int, dict[str, Any] | None]:
     cmd = [sys.executable, "/app/therapieplan_sync.py", "--config", config_file]
     if verbose:
@@ -156,6 +258,18 @@ def run_sync(
         cmd.extend(["--stats-file", str(stats_file)])
 
     env = os.environ.copy()
+    if retry_attempt > 0:
+        env["SYNC_IS_RETRY"] = "1"
+        env["SYNC_RETRY_ATTEMPT"] = str(retry_attempt)
+    else:
+        env.pop("SYNC_IS_RETRY", None)
+        env.pop("SYNC_RETRY_ATTEMPT", None)
+
+    if suppress_no_change_notification:
+        env["SYNC_SUPPRESS_NO_CHANGE_NOTIFICATION"] = "1"
+    else:
+        env.pop("SYNC_SUPPRESS_NO_CHANGE_NOTIFICATION", None)
+
     if window_start is not None and window_end is not None and window_end > window_start:
         env["SYNC_WINDOW_START"] = window_start.isoformat()
         env["SYNC_WINDOW_END"] = window_end.isoformat()
@@ -227,6 +341,8 @@ def run_sync_with_retries(
             window_start=window_start,
             window_end=window_end,
             stats_file=stats_file,
+            retry_attempt=attempt - 1,
+            suppress_no_change_notification=(attempt > 1),
         )
 
         reason = _format_retry_reason(
@@ -260,18 +376,19 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_stop)
 
     config_file = os.environ.get("CONFIG_FILE", "/app/data/config.yaml")
-    schedule_raw = os.environ.get("SYNC_TIMES", "06:00,12:00,18:00,22:00")
+    runtime = _runtime_settings(config_file)
+    schedule_raw = runtime["schedule_raw"]
     run_once = bool_env("RUN_ONCE", False)
-    run_on_start = bool_env("RUN_ON_START", False)
+    run_on_start = bool(runtime["run_on_start"])
     verbose = bool_env("VERBOSE", False)
     tz = get_timezone()
 
-    retry_enabled = bool_env("SYNC_RETRY_ENABLED", True)
-    retry_max_attempts = non_negative_int_env("SYNC_RETRY_MAX_ATTEMPTS", 3)
-    retry_delay_seconds = positive_int_env("SYNC_RETRY_DELAY_SECONDS", 300)
-    retry_when_no_changes = bool_env("SYNC_RETRY_WHEN_NO_CHANGES", True)
-    retry_when_errors = bool_env("SYNC_RETRY_WHEN_ERRORS", True)
-    stats_file = Path(os.environ.get("SYNC_STATS_FILE", "/app/data/last_sync_stats.json"))
+    retry_enabled = bool(runtime["retry_enabled"])
+    retry_max_attempts = int(runtime["retry_max_attempts"])
+    retry_delay_seconds = int(runtime["retry_delay_seconds"])
+    retry_when_no_changes = bool(runtime["retry_when_no_changes"])
+    retry_when_errors = bool(runtime["retry_when_errors"])
+    stats_file = runtime["stats_file"]
 
     if not Path(config_file).exists():
         logging.error("Config-Datei fehlt: %s", config_file)

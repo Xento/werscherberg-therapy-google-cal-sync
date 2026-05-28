@@ -1,33 +1,35 @@
 # Therapieplan → Google Kalender Sync
 
-Docker-basierter Sync für Therapiepläne der Werscherberg-Webseite in Google Kalender. Das Projekt ruft die Therapieplan-JSON-Schnittstelle ab, schreibt Termine in einen oder mehrere Google-Kalender, aktualisiert geänderte Termine und kann entfernte Termine als abgesagt behandeln. Optional werden Pushbenachrichtigungen über Pushover oder Home Assistant versendet.
+Docker-basierter Sync für Werscherberg-Therapiepläne in Google Kalender. Das Projekt ruft die JSON-Schnittstelle der Therapieplan-Webseite ab, schreibt Termine in einen oder mehrere Google-Kalender, aktualisiert Änderungen und kann entfernte Termine als abgesagt behandeln. Optional werden Pushbenachrichtigungen über Pushover oder Home Assistant versendet.
+
+## Konfigurationsprinzip
+
+Die Konfiguration ist bewusst getrennt:
+
+| Datei | Zweck |
+|---|---|
+| `.env` | Nur technische Containerwerte, OAuth-Port und geheime Tokens |
+| `data/config.yaml` | Fachliche Konfiguration: Therapiepläne, Kalender, Zeiten, Retries, Pushregeln, Farben, Erinnerungen |
+
+Damit muss man für den normalen Betrieb fast alles in **einer Datei** pflegen: `data/config.yaml`. In `.env` gehören nur Secrets und wenige Docker-/OAuth-Werte.
 
 ## Funktionsumfang
 
 - mehrere Therapieplan-URLs / Personen in einem Container
 - ein oder mehrere Zielkalender pro Plan oder global
-- getrennte Sync-Kennungen pro Plan und Kalender
+- Party-Filter für Eltern-/Kind-/Mehrpersonen-JSON
 - Google-Event-Farben pro Plan
 - Google-Kalender-Erinnerungen pro Termin
 - konfigurierbare Sichtbarkeit, z. B. `default` statt `private`
-- Sync zu festen Uhrzeiten, z. B. `06:00,12:00,18:00,22:00`
+- Sync zu festen Uhrzeiten, konfiguriert in `data/config.yaml`
+- automatische Retries nach geplanten Sync-Zeitpunkten
 - Pushbenachrichtigung bei neuen, geänderten und entfernten Terminen
 - dreistufige Pushover-Intensität:
   - Stufe 0: Änderungen für spätere Tage
   - Stufe 1: Änderungen am gleichen Tag
   - Stufe 2: Änderungen im nächsten Abschnitt bis zum nächsten Sync-Zeitpunkt
+- Fehlerdiagnose für Google `token.json`
 - einmaliger Google-OAuth-Login, danach automatischer Betrieb mit `token.json`
-
-## Dokumentation
-
-Für eine vollständige Einrichtung lies die Dokumentation in dieser Reihenfolge:
-
-1. [Installation](docs/INSTALLATION.md)
-2. [Google Calendar API und OAuth einrichten](docs/GOOGLE_SETUP.md)
-3. [Konfiguration](docs/CONFIGURATION.md)
-4. [Betrieb, Tests und Updates](docs/OPERATIONS.md)
-5. [Fehlerbehebung](docs/TROUBLESHOOTING.md)
-6. [Sicherheit und Datenschutz](docs/SECURITY.md)
 
 ## Schnellstart
 
@@ -39,11 +41,11 @@ cp .env.example .env
 cp data/config.example.yaml data/config.yaml
 ```
 
-Danach anpassen:
+Dann bearbeiten:
 
 ```bash
-nano .env
-nano data/config.yaml
+nano .env              # nur Tokens/OAuth/Containerwerte
+nano data/config.yaml  # Therapiepläne, Kalender, Zeiten, Pushregeln
 ```
 
 Google-OAuth-Datei ablegen:
@@ -73,7 +75,7 @@ Einmaliger echter Sync:
 Dauerbetrieb starten:
 
 ```bash
-docker compose up -d --build therapieplan-sync
+./scripts/start.sh
 ```
 
 Logs anzeigen:
@@ -82,15 +84,44 @@ Logs anzeigen:
 ./scripts/logs.sh
 ```
 
-## Minimale Beispielkonfiguration
+## Minimale `.env`
 
-`data/config.yaml`:
+```env
+TZ=Europe/Berlin
+VERBOSE=0
+
+PUSHOVER_TOKEN=dein_application_api_token
+PUSHOVER_USER=dein_user_key
+PUSHOVER_DEVICE=
+
+GOOGLE_AUTH_HOST=localhost
+GOOGLE_AUTH_BIND_ADDR=0.0.0.0
+GOOGLE_AUTH_PORT=6080
+GOOGLE_AUTH_PUBLISH_ADDR=127.0.0.1
+```
+
+## Beispiel `data/config.yaml`
 
 ```yaml
+scheduler:
+  sync_times:
+    - "07:30"
+    - "10:00"
+    - "12:00"
+    - "18:00"
+  run_on_start: false
+  retry:
+    enabled: true
+    max_attempts: 15
+    delay_seconds: 60
+    when_no_changes: true
+    when_errors: true
+    stats_file: "last_sync_stats.json"
+
 therapy:
   request_timeout_seconds: 30
   verify_tls: true
-  user_agent: "therapieplan-calendar-sync/1.3"
+  user_agent: "therapieplan-calendar-sync/2.0"
 
 therapy_plans:
   - id: "person-1"
@@ -98,7 +129,9 @@ therapy_plans:
     url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/DEIN_TOKEN/"
     birth_date: "TT.MM.JJJJ"
     color_id: "6"
-    event_prefix: ""
+    party_filter: "all"
+    calendar_ids:
+      - "primary"
 
 google:
   credentials_file: "credentials.json"
@@ -115,6 +148,9 @@ sync:
   dry_run: false
   include_details_in_description: true
   include_sync_timestamps_in_description: true
+  match_existing_events: true
+  match_time_tolerance_minutes: 90
+  match_min_score: 8
   visibility: "default"
   transparency: "opaque"
   reminders:
@@ -124,53 +160,48 @@ sync:
         minutes: 20
       - method: "popup"
         minutes: 10
+
+notifications:
+  enabled: true
+  title_prefix: "Therapieplan"
+  notify_on:
+    changes: true
+    errors: true
+    success_no_changes: true
+  include_change_details: true
+  max_change_items: 12
+  max_message_chars: 950
+  intense_same_day_changes: true
+  intense_next_sync_window_changes: true
+  providers:
+    pushover:
+      enabled: true
+      token: ""     # besser in .env: PUSHOVER_TOKEN
+      user: ""      # besser in .env: PUSHOVER_USER
+      device: ""    # optional in .env: PUSHOVER_DEVICE
+      priority: 0
+      sound: "pushover"
+  pushover_levels:
+    level0_future:
+      priority: 0
+      sound: "incoming"
+      retry: 60
+      expire: 1800
+    level1_same_day:
+      priority: 1
+      sound: "echo"
+      retry: 60
+      expire: 1800
+    level2_next_window:
+      priority: 2
+      sound: "echo"
+      retry: 60
+      expire: 1800
 ```
-
-`.env`:
-
-```env
-TZ=Europe/Berlin
-SYNC_TIMES=06:00,12:00,18:00,22:00
-RUN_ON_START=0
-
-# Neuversuche nach einem geplanten Sync-Zeitpunkt.
-# Default: 3 Neuversuche alle 5 Minuten, wenn keine Änderungen gefunden wurden oder Fehler auftraten.
-SYNC_RETRY_ENABLED=1
-SYNC_RETRY_MAX_ATTEMPTS=3
-SYNC_RETRY_DELAY_SECONDS=300
-SYNC_RETRY_WHEN_NO_CHANGES=1
-SYNC_RETRY_WHEN_ERRORS=1
-
-NOTIFICATIONS_ENABLED=1
-NOTIFY_ON_CHANGES=1
-NOTIFY_ON_ERRORS=1
-NOTIFY_ON_SUCCESS_NO_CHANGES=1
-NOTIFY_INCLUDE_CHANGE_DETAILS=1
-
-PUSHOVER_ENABLED=1
-PUSHOVER_TOKEN=dein_application_api_token
-PUSHOVER_USER=dein_user_key
-PUSHOVER_DEVICE=
-
-PUSHOVER_LEVEL0_PRIORITY=0
-PUSHOVER_LEVEL0_SOUND=pushover
-PUSHOVER_LEVEL1_PRIORITY=1
-PUSHOVER_LEVEL1_SOUND=persistent
-PUSHOVER_LEVEL2_PRIORITY=2
-PUSHOVER_LEVEL2_SOUND=echo
-PUSHOVER_LEVEL2_RETRY=60
-PUSHOVER_LEVEL2_EXPIRE=1800
-
-GOOGLE_AUTH_HOST=localhost
-GOOGLE_AUTH_BIND_ADDR=0.0.0.0
-GOOGLE_AUTH_PORT=6080
-GOOGLE_AUTH_PUBLISH_ADDR=127.0.0.1
-```
-
 
 ## Party-Filter
 
-Falls eine Therapieplan-URL mehrere Parteien enthält, kann pro Quelle gefiltert werden. Leere `party`-Werte stehen typischerweise für Eltern-/Begleitpersonen-Termine; benannte Werte für Kind-/Personen-Termine.
+Falls eine Therapieplan-URL mehrere Parteien enthält, kann pro Quelle gefiltert werden:
 
 ```yaml
 therapy_plans:
@@ -185,122 +216,41 @@ therapy_plans:
     url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/DEIN_TOKEN/"
     birth_date: "TT.MM.JJJJ"
     party_filter:
-      include: ["Person 1"]
+      include:
+        - "Person 1"
 ```
-
-Weitere Varianten stehen in `docs/CONFIGURATION.md`.
 
 ## Geplante Neuversuche
 
-Nach jedem geplanten Sync-Zeitpunkt kann der Daemon automatisch weitere Läufe ausführen. Das ist nützlich, wenn der Therapieplan nicht exakt zur eingestellten Minute aktualisiert wird oder wenn kurzfristig ein Netzwerkfehler auftritt.
+Retries werden jetzt in `data/config.yaml` unter `scheduler.retry` konfiguriert:
 
-Standard:
-
-```env
-SYNC_RETRY_ENABLED=1
-SYNC_RETRY_MAX_ATTEMPTS=3
-SYNC_RETRY_DELAY_SECONDS=300
-SYNC_RETRY_WHEN_NO_CHANGES=1
-SYNC_RETRY_WHEN_ERRORS=1
+```yaml
+scheduler:
+  retry:
+    enabled: true
+    max_attempts: 15
+    delay_seconds: 60
+    when_no_changes: true
+    when_errors: true
 ```
 
-Damit läuft z. B. bei `SYNC_TIMES=06:00,12:00,18:00,22:00` ein Sync um 06:00 und, wenn keine Änderungen erkannt wurden oder ein Fehler auftrat, optional weitere Versuche um 06:05, 06:10 und 06:15.
+Bei Retry-Läufen wegen „keine Änderungen“ wird die Pushmeldung für „keine Änderungen“ automatisch unterdrückt. Push kommt bei Retry nur bei echten Änderungen oder Fehlern.
 
-## Repository-Struktur
+## Dokumentation
 
-```text
-.
-├── Dockerfile
-├── docker-compose.yml
-├── README.md
-├── requirements.txt
-├── sync_daemon.py
-├── therapieplan_sync.py
-├── .env.example
-├── data/
-│   ├── README.md
-│   ├── config.example.yaml
-│   └── config.example.yaml
-├── docs/
-│   ├── INSTALLATION.md
-│   ├── GOOGLE_SETUP.md
-│   ├── CONFIGURATION.md
-│   ├── OPERATIONS.md
-│   ├── TROUBLESHOOTING.md
-│   └── SECURITY.md
-└── scripts/
-    ├── init-google-auth.sh
-    ├── dry-run.sh
-    ├── run-once.sh
-    ├── start.sh
-    ├── stop.sh
-    ├── logs.sh
-    ├── check-google-token.sh
-    ├── repair-google-token.sh
-    ├── test-notification.sh
-    ├── diagnose-pushover.sh
-    └── test-pushover-levels.sh
-```
+Für eine vollständige Einrichtung lies die Dokumentation in dieser Reihenfolge:
+
+1. [Installation](docs/INSTALLATION.md)
+2. [Google Calendar API und OAuth einrichten](docs/GOOGLE_SETUP.md)
+3. [Konfiguration](docs/CONFIGURATION.md)
+4. [Migration auf vereinfachte Config](docs/MIGRATION_CONFIG_V2.md)
+5. [Betrieb, Tests und Updates](docs/OPERATIONS.md)
+6. [Fehlerbehebung](docs/TROUBLESHOOTING.md)
+7. [Sicherheit und Datenschutz](docs/SECURITY.md)
 
 ## Wichtige Hinweise
 
-- `data/credentials.json`, `data/token.json`, `data/state.json` und echte Therapieplan-URLs enthalten sensible Daten und gehören nicht in Git.
+- `data/credentials.json`, `data/token.json`, `data/state.json`, `.env` und echte Therapieplan-URLs enthalten sensible Daten und gehören nicht in Git.
 - Der Google-Account, mit dem OAuth durchgeführt wird, muss Schreibrechte auf alle Zielkalender haben.
 - Wenn `delete_missing_future: true` gesetzt ist, werden zukünftige Kalendertermine gelöscht, die in der jeweiligen Therapieplan-Quelle nicht mehr vorhanden sind. Nur so kann eine Entfernung als „Abgesagt“ gemeldet werden.
 - Für Pushover `priority=2` sind `retry` und `expire` Pflicht.
-
-## Terminart im Google-Termin
-
-Ab Sync-Version 1.7 wird nur die Terminart zusätzlich gespeichert. Bei aktivem
-`include_details_in_description: true` steht z. B. in der Beschreibung:
-
-```text
-Terminart: Gruppentermin (G)
-```
-
-Maschinenlesbar werden außerdem nur `form` und `formLabel` in
-`extendedProperties.private` des Google-Termins abgelegt.
-
-## Fehler: `Expecting value: line 1 column 1 (char 0)` bei `token.json`
-
-Dieser Fehler bedeutet, dass `data/token.json` leer oder beschädigt ist. Die Datei enthält das lokal gespeicherte Google-OAuth-Token. Sie kann z. B. durch einen abgebrochenen Schreibvorgang oder manuelles Bearbeiten ungültig werden.
-
-Zuerst prüfen:
-
-```bash
-./scripts/check-google-token.sh
-```
-
-Das Skript prüft `data/credentials.json` und `data/token.json` und gibt eine konkrete Handlungsempfehlung aus.
-
-Reparatur, wenn die Prüfung eine beschädigte Token-Datei meldet:
-
-```bash
-./scripts/stop.sh
-./scripts/repair-google-token.sh
-./scripts/init-google-auth.sh
-./scripts/run-once.sh
-./scripts/start.sh
-```
-
-Der Sync erkennt in der aktuellen Version eine leere oder ungültige `token.json`, sichert sie als `token.json.invalid-<timestamp>` und sendet bei aktivierter Fehlerbenachrichtigung eine Pushmeldung.
-
-
-### Sync-Zeitstempel im Termin
-
-Optional kann der Sync in die Google-Terminbeschreibung schreiben, wann der Termin durch den Sync erstmals erstellt und wann er zuletzt durch eine echte Änderung aktualisiert wurde:
-
-```yaml
-sync:
-  include_sync_timestamps_in_description: true
-```
-
-Beispiel in der Terminbeschreibung:
-
-```text
-Sync-Informationen:
-Erstellt durch Sync: 27.05.2026 21:55:00 CEST
-Zuletzt geändert durch Sync: 28.05.2026 07:35:00 CEST
-```
-
-Die Werte werden zusätzlich in `extendedProperties.private` als `syncCreatedAt` und optional `syncModifiedAt` gespeichert.
