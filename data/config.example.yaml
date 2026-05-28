@@ -1,153 +1,194 @@
 # Therapieplan -> Google Kalender Sync
 #
-# Mehrere Therapieplan-URLs werden über therapy_plans synchronisiert.
-# Alle Quellen können in einen oder mehrere Google-Kalender geschrieben werden.
-# Standard: google.calendar_ids gilt für alle Pläne.
-# Optional: therapy_plans[].calendar_ids überschreibt die Zielkalender für einen einzelnen Plan.
+# Ziel der neuen Struktur:
+# - .env enthält nur Container-/OAuth-Werte und geheime Tokens.
+# - Diese config.yaml enthält die fachliche Konfiguration:
+#   Therapiepläne, Zielkalender, Sync-Zeiten, Retries, Benachrichtigungen,
+#   Kalenderdarstellung, Erinnerungen und Filter.
+
+# Google-Calendar-Event-Farben / color_id:
+# "1"  = Lavender / Lavendel       = helles Lila
+# "2"  = Sage / Salbei             = helles Grün
+# "3"  = Grape / Traube            = Violett
+# "4"  = Flamingo                  = Rosa / Pink
+# "5"  = Banana / Banane           = Gelb
+# "6"  = Tangerine / Orange        = Orange
+# "7"  = Peacock / Pfau            = Türkis / Cyan
+# "8"  = Graphite / Graphit        = Grau
+# "9"  = Blueberry / Blaubeere     = Blau
+# "10" = Basil / Basilikum         = Grün
+# "11" = Tomato / Tomate           = Rot
+
+scheduler:
+  # Bis zu vier Uhrzeiten im Format HH:MM oder HH:MM:SS.
+  # Diese Zeiten steuern den dauerhaft laufenden Container.
+  sync_times:
+    - "07:30"
+    - "10:00"
+    - "12:00"
+    - "18:00"
+
+  # true = direkt beim Containerstart zusätzlich synchronisieren.
+  run_on_start: false
+
+  retry:
+    enabled: true
+    # Beispiel wie bisher gewünscht: bis zu 15 Neuversuche alle 60 Sekunden.
+    # Für den konservativen Standard nimm max_attempts: 3 und delay_seconds: 300.
+    max_attempts: 15
+    delay_seconds: 60
+    when_no_changes: true
+    when_errors: true
+    stats_file: "last_sync_stats.json"
+    # Retry-Läufe ohne Änderung senden automatisch keine "keine Änderung"-Pushmeldung.
+    # Push kommt bei Retry nur bei echten Änderungen oder Fehlern.
 
 therapy:
   # Gemeinsame Defaults für alle Einträge unter therapy_plans.
-  # Einzelne Pläne können diese Werte überschreiben.
   request_timeout_seconds: 30
   verify_tls: true
-  user_agent: "therapieplan-calendar-sync/1.5"
+  user_agent: "therapieplan-calendar-sync/2.0"
 
 therapy_plans:
-  - id: "plan-kind-1"
-    name: "Therapieplan Kind 1"
+  - id: "person-1"
+    name: "Person 1"
     url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/REPLACE_ME_1/"
-    birth_date: ""
-    # Optional: leer lassen, wird nach erfolgreichem Login in state.json gespeichert.
+    birth_date: "TT.MM.JJJJ"
     access_token: ""
-    # Google Calendar Event-Farbe. Zulässig: 1-11 oder Namen wie blueberry, basil, tomato.
-    color_id: "9"
+
+    # Orange
+    color_id: "6"
+    event_prefix: ""
+
     # Optional: eigene Zielkalender nur für diesen Plan.
-    # Wenn leer/auskommentiert, werden google.calendar_ids genutzt.
-    # calendar_ids:
-    #   - "primary"
-    #   - "abcdef1234567890@group.calendar.google.com"
-    # Optional: Party-Filter. Relevant, wenn ein Plan mehrere Parteien enthält.
-    # Die neue JSON-Struktur kann z. B. Elterntermine mit party: "" und Kind-Termine mit party: "Kind 1" liefern.
-    # Beispiele:
-    # party_filter: "empty"                 # nur Eltern-/Begleitpersonen-Termine mit leerer party
-    # party_filter: "non_empty"             # alle Termine mit gesetzter party
-    # party_filter:
-    #   include: ["Kind 1"]                 # nur Termine dieser Party
-    # party_filter:
-    #   exclude: ["Kind 1"]                 # alles außer dieser Party
+    # Wenn nicht gesetzt, werden google.calendar_ids genutzt.
+    calendar_ids:
+      - "primary"
+
+    # Party-Filter. Relevant, wenn ein Zugang Termine mehrerer Personen liefert.
+    # all       = alle Termine importieren
+    # empty     = nur Termine mit party: "" importieren, typischerweise Eltern-/Begleitperson
+    # non_empty = nur Termine mit gesetzter party importieren
+    # include/exclude = gezielte Party-Werte importieren/ausschließen
     party_filter: "all"
+    # party_filter:
+    #   include:
+    #     - "Person 1"
 
-    # Optional: Erinnerung nur für diesen Plan in Minuten vor Terminbeginn. Leer = globaler Wert bzw. Kalenderstandard.
-    reminder_minutes:
-    reminder_method: "popup"
-    # Optional. Leer = nur Leistungsname; Beispiel: "Kind 1: "
-    event_prefix: ""
-
-  - id: "plan-kind-2"
-    name: "Therapieplan Kind 2"
+  - id: "person-2"
+    name: "Person 2"
     url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/REPLACE_ME_2/"
-    birth_date: ""
+    birth_date: "TT.MM.JJJJ"
     access_token: ""
+
+    # Grün
     color_id: "10"
-    # Beispiel: Nur Termine für diese Party übernehmen.
-    # party_filter:
-    #   include: ["Kind 2"]
-    party_filter: "all"
-    reminder_minutes:
-    reminder_method: "popup"
     event_prefix: ""
 
-# Globale Zielkalender. Alle oben definierten Quellen werden in diese Kalender geschrieben,
-# sofern ein Plan nicht eigene therapy_plans[].calendar_ids definiert.
+    # Beispiel: Nur Eltern-/Begleitpersonen-Termine mit leerer party übernehmen.
+    party_filter: "empty"
+
+    calendar_ids:
+      - "primary"
+
 google:
   credentials_file: "credentials.json"
   token_file: "token.json"
 
-  # Rückwärtskompatibel: ein einzelner Kalender.
-  calendar_id: "primary"
+  # Fallback-Zielkalender für Pläne ohne eigene calendar_ids.
+  calendar_ids:
+    - "primary"
 
-  # Neu: mehrere Zielkalender. Wenn calendar_ids gesetzt ist, wird calendar_id ignoriert.
-  # calendar_ids:
-  #   - "primary"
-  #   - "abcdef1234567890@group.calendar.google.com"
   timezone: "Europe/Berlin"
 
 sync:
   state_file: "state.json"
   source_name: "therapieplan-sync"
-  # Globaler Prefix, falls ein Plan kein eigenes event_prefix definiert.
-  event_prefix: "Therapie: "
+
   include_past_days: 0
   delete_missing_future: true
   dry_run: false
+
   include_details_in_description: true
-  # true = Terminbeschreibung enthält zusätzlich, wann der Google-Termin durch den Sync erstellt/geändert wurde.
   include_sync_timestamps_in_description: true
+
+  # default = normale Kalendersichtbarkeit verwenden
+  # private = privat
+  # public = öffentlich
+  # confidential = nicht verwenden
   visibility: "default"
+
+  # opaque = blockt Zeit im Kalender
+  # transparent = blockt Zeit nicht
   transparency: "opaque"
-  # Optional: globale Google-Kalender-Erinnerung in Minuten vor Terminbeginn.
-  # Leer lassen, wenn die Standarderinnerungen des Zielkalenders genutzt werden sollen.
-  # Beispiel: reminder_minutes: 30
-  reminder_minutes:
-  reminder_method: "popup"
-  # Erweiterte Alternative. Wird nur genutzt, wenn reminder_minutes leer ist.
+
+  # Google-Kalender-Erinnerungen:
+  # method: "popup" = App-/Gerätebenachrichtigung
+  # method: "email" = E-Mail-Erinnerung
   reminders:
-    use_default: true
-    overrides: []
+    use_default: false
+    overrides:
+      - method: "popup"
+        minutes: 20
+      - method: "popup"
+        minutes: 10
 
 notifications:
-  enabled: false
-  notify_on:
-    changes: true              # Push bei neuen/geänderten/abgesagten Terminen
-    errors: true               # Push bei Sync-Fehlern
-    success_no_changes: true   # Push auch wenn nichts geändert wurde
+  enabled: true
+  title_prefix: "Therapieplan"
 
-  # true = Push enthält die betroffenen Termine mit Datum/Uhrzeit/Titel.
+  notify_on:
+    changes: true
+    errors: true
+    success_no_changes: true
+
   include_change_details: true
-  # Maximale Anzahl einzelner Termine in einer Pushmeldung.
   max_change_items: 12
-  # Pushover ist bei langen Nachrichten begrenzt. 950 ist praxisnah und verhindert API-Fehler.
   max_message_chars: 950
 
-  # Eskalationslogik für geänderte/neue/abgesagte Termine:
-  # Stufe 0 = Terminänderungen für spätere Tage
-  # Stufe 1 = Terminänderungen am gleichen Kalendertag
-  # Stufe 2 = Terminänderungen im nächsten Abschnitt zwischen zwei Sync-Uhrzeiten
+  # 3-Stufen-Logik:
+  # Stufe 0 = Änderungen für spätere Tage
+  # Stufe 1 = Änderungen am gleichen Tag
+  # Stufe 2 = Änderungen im nächsten Abschnitt zwischen zwei Sync-Zeitpunkten
   intense_same_day_changes: true
   intense_next_sync_window_changes: true
 
-  # Pushover-Stufen. priority/sound sind je Stufe getrennt einstellbar.
+  providers:
+    pushover:
+      enabled: true
+      # Empfehlung: token/user/device in .env setzen, nicht hier.
+      token: ""
+      user: ""
+      device: ""
+      # Fallback für normale Pushmeldungen, falls keine Level-Konfiguration greift.
+      priority: 0
+      sound: "pushover"
+
+    homeassistant:
+      enabled: false
+      url: "http://homeassistant.local:8123"
+      # Empfehlung: Token in .env setzen.
+      token: ""
+      notify_service: ""
+
+  # Pushover-Priorität und Ton pro Stufe.
   # priority: -2 = lautlos, -1 = quiet, 0 = normal, 1 = high, 2 = emergency
   # Bei priority 2 werden retry und expire benötigt.
   pushover_levels:
     level0_future:
       priority: 0
-      sound: "pushover"
+      sound: "incoming"
       retry: 60
       expire: 1800
+
     level1_same_day:
       priority: 1
-      sound: "persistent"
+      sound: "echo"
       retry: 60
       expire: 1800
+
     level2_next_window:
       priority: 2
       sound: "echo"
       retry: 60
       expire: 1800
-
-  title_prefix: "Therapieplan"
-  providers:
-    pushover:
-      enabled: false
-      token: ""
-      user: ""
-      device: ""
-      # Fallback/Legacy. Für Terminänderungen werden bevorzugt pushover_levels genutzt.
-      priority: 0
-      sound: "pushover"
-    homeassistant:
-      enabled: false
-      url: "http://homeassistant.local:8123"
-      token: ""
-      notify_service: ""
