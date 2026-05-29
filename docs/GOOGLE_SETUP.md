@@ -72,6 +72,8 @@ Wichtig: Nicht als Web Application anlegen. Für dieses Projekt ist `Desktop app
 
 ## 5. OAuth-Port konfigurieren
 
+Für den Google-OAuth-Login muss der Redirect-Host **localhost** bleiben. Verwende keine private IP-Adresse wie `192.168.x.x` als `GOOGLE_AUTH_HOST`, weil Google diesen Redirect bei Desktop-OAuth-Clients ablehnen kann.
+
 Standard in `.env`:
 
 ```env
@@ -81,22 +83,68 @@ GOOGLE_AUTH_PORT=6080
 GOOGLE_AUTH_PUBLISH_ADDR=127.0.0.1
 ```
 
-Das ist passend, wenn du den Browser auf demselben Linux-Host öffnest.
+Das passt, wenn Browser und Docker-Host derselbe Rechner sind.
 
-Wenn der Docker-Host z. B. ein Server ohne Browser ist und du den Link von deinem PC im Netzwerk öffnest:
+### Docker-Host ohne Browser: Variante A mit SSH-Tunnel
+
+Empfohlen, wenn der Browser auf einem anderen Rechner läuft:
+
+```bash
+ssh -L 6080:127.0.0.1:6080 benutzer@DOCKER_HOST_IP
+```
+
+Danach bleibt `.env` auf `localhost` und der Link `http://localhost:6080/` funktioniert im Browser deines PCs über den Tunnel.
+
+### Docker-Host ohne Browser: Variante B mit manuellem Hostwechsel im Redirect-Link
+
+Diese Variante ist nützlich, wenn du keinen SSH-Tunnel nutzen willst. Wichtig: Auch hier bleibt der OAuth-Redirect für Google auf `localhost`. Nur der finale Browseraufruf wird manuell an den Docker-Host geschickt.
+
+`.env`:
 
 ```env
-GOOGLE_AUTH_HOST=192.0.2.10
+GOOGLE_AUTH_HOST=localhost
 GOOGLE_AUTH_BIND_ADDR=0.0.0.0
 GOOGLE_AUTH_PORT=6080
 GOOGLE_AUTH_PUBLISH_ADDR=0.0.0.0
 ```
 
-Dann zeigt der OAuth-Link auf:
+Ablauf:
 
-```text
-http://192.0.2.10:6080/
+1. Starte den Login:
+
+   ```bash
+   ./scripts/init-google-auth.sh
+   ```
+
+2. Öffne die angezeigte Google-URL im Browser.
+3. Melde dich bei Google an.
+4. Google leitet danach auf eine URL ähnlich dieser um:
+
+   ```text
+   http://localhost:6080/?state=...&code=...&scope=...
+   ```
+
+5. Wenn dein Browser nicht auf dem Docker-Host läuft, kann `localhost` nicht funktionieren. Ändere dann **nur den Hostnamen** in der Adresszeile, lasse Pfad und Query unverändert:
+
+   ```text
+   http://DOCKER_HOST_IP:6080/?state=...&code=...&scope=...
+   ```
+
+   Beispiel:
+
+   ```text
+   http://192.168.158.10:6080/?state=...&code=...&scope=...
+   ```
+
+6. Drücke Enter. Der Container erhält dadurch den Authorization Code und erzeugt `data/token.json`.
+
+Nicht setzen:
+
+```env
+GOOGLE_AUTH_HOST=192.168.158.10
 ```
+
+Das würde die private IP bereits in den Google-Redirect einbauen und kann zu `Fehler 400: invalid_request` führen.
 
 ## 6. Login starten
 

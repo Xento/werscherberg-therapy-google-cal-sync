@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
+import difflib
 import datetime as dt
 import hashlib
 import json
@@ -39,7 +40,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
-SYNC_VERSION = "1.8"
+SYNC_VERSION = "2.0"
 SUPPORTED_FORMS = {"V", "A", "E", "C", "G"}
 HIDDEN_FLAG = 0x20000000
 
@@ -106,6 +107,9 @@ class SyncConfig:
     reminders: Dict[str, Any]
     reminder_minutes: Optional[int]
     reminder_method: str
+    match_existing_events: bool
+    match_time_tolerance_minutes: int
+    match_min_score: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -149,12 +153,25 @@ class NotificationConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class SchedulerConfig:
+    sync_times: Tuple[str, ...]
+    run_on_start: bool
+    retry_enabled: bool
+    retry_max_attempts: int
+    retry_delay_seconds: int
+    retry_when_no_changes: bool
+    retry_when_errors: bool
+    retry_stats_file: str
+
+
+@dataclasses.dataclass(frozen=True)
 class AppConfig:
     therapy: TherapyConfig
     plans: Tuple[TherapyConfig, ...]
     google: GoogleConfig
     sync: SyncConfig
     notifications: NotificationConfig
+    scheduler: SchedulerConfig
     base_dir: Path
 
 
@@ -203,6 +220,62 @@ def env_bool_or_config(env_name: str, mapping: Dict[str, Any], key: str, default
     if value is not None:
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
     return bool(mapping.get(key, default))
+
+
+def config_or_env(mapping: Dict[str, Any], key: str, env_name: str, default: Any = "") -> Any:
+    if isinstance(mapping, dict) and key in mapping:
+        value = mapping.get(key)
+        # Empty strings in YAML for secrets should allow .env fallback.
+        if value not in {None, ""}:
+            return value
+    value = os.environ.get(env_name)
+    if value is not None:
+        return value
+    return mapping.get(key, default) if isinstance(mapping, dict) else default
+
+
+def config_bool_or_env(mapping: Dict[str, Any], key: str, env_name: str, default: bool = False) -> bool:
+    if isinstance(mapping, dict) and key in mapping:
+        return config_bool(mapping, key, default)
+    value = os.environ.get(env_name)
+    if value is not None:
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def config_bool(mapping: Dict[str, Any], key: str, default: bool = False) -> bool:
+    value = mapping.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def config_int(mapping: Dict[str, Any], key: str, default: int, *, minimum: Optional[int] = None) -> int:
+    value = mapping.get(key, default)
+    if value is None or str(value).strip() == "":
+        result = default
+    else:
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            result = default
+    if minimum is not None and result < minimum:
+        return default
+    return result
+
+
+def normalize_sync_time_strings(value: Any, default: Tuple[str, ...] = ("07:30", "10:00", "12:00", "18:00")) -> Tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        items = []
+    return tuple(items or default)
 
 
 def slugify_plan_id(value: str, fallback: str) -> str:
@@ -604,6 +677,12 @@ def load_config(path: Path) -> AppConfig:
     google = data.get("google") or {}
     sync = data.get("sync") or {}
     notifications = data.get("notifications") or {}
+    scheduler = data.get("scheduler") or {}
+    if not isinstance(scheduler, dict):
+        scheduler = {}
+    scheduler_retry = scheduler.get("retry") or {}
+    if not isinstance(scheduler_retry, dict):
+        scheduler_retry = {}
     notify_on = notifications.get("notify_on") or {}
     providers = notifications.get("providers") or {}
     pushover = providers.get("pushover") or {}
@@ -612,8 +691,8 @@ def load_config(path: Path) -> AppConfig:
     if not isinstance(pushover_levels, dict):
         pushover_levels = {}
 
-    po_priority = int(env_or_config("PUSHOVER_PRIORITY", pushover, "priority", 0) or 0)
-    po_sound = str(env_or_config("PUSHOVER_SOUND", pushover, "sound", "") or "").strip()
+    po_priority = int(config_or_env(pushover, "priority", "PUSHOVER_PRIORITY", 0) or 0)
+    po_sound = str(config_or_env(pushover, "sound", "PUSHOVER_SOUND", "") or "").strip()
 
     def level_mapping(*names: str) -> Dict[str, Any]:
         for name in names:
@@ -627,7 +706,14 @@ def load_config(path: Path) -> AppConfig:
     level2_map = level_mapping("level2", "level2_next_window", "next_window", "emergency")
 
     def level_value(env_names: Iterable[str], mapping: Dict[str, Any], keys: Iterable[str], default: Any) -> Any:
-        return env_or_config_multi(env_names, mapping, keys, default)
+        for key in keys:
+            if isinstance(mapping, dict) and key in mapping:
+                return mapping.get(key)
+        for env_name in env_names:
+            value = os.environ.get(env_name)
+            if value is not None:
+                return value
+        return default
 
     level0_priority = int(level_value(("PUSHOVER_LEVEL0_PRIORITY",), level0_map, ("priority",), po_priority) or 0)
     level0_sound = str(level_value(("PUSHOVER_LEVEL0_SOUND",), level0_map, ("sound",), po_sound) or "").strip()
@@ -650,6 +736,16 @@ def load_config(path: Path) -> AppConfig:
 
     cfg = AppConfig(
         base_dir=base_dir,
+        scheduler=SchedulerConfig(
+            sync_times=normalize_sync_time_strings(scheduler.get("sync_times")),
+            run_on_start=config_bool(scheduler, "run_on_start", False),
+            retry_enabled=config_bool(scheduler_retry, "enabled", True),
+            retry_max_attempts=config_int(scheduler_retry, "max_attempts", 3, minimum=0),
+            retry_delay_seconds=config_int(scheduler_retry, "delay_seconds", 300, minimum=1),
+            retry_when_no_changes=config_bool(scheduler_retry, "when_no_changes", True),
+            retry_when_errors=config_bool(scheduler_retry, "when_errors", True),
+            retry_stats_file=str(scheduler_retry.get("stats_file", "last_sync_stats.json")),
+        ),
         therapy=plans[0],
         plans=plans,
         google=GoogleConfig(
@@ -673,18 +769,21 @@ def load_config(path: Path) -> AppConfig:
             reminders=normalize_reminders(sync.get("reminders", {"use_default": True, "overrides": []})),
             reminder_minutes=parse_optional_int(sync.get("reminder_minutes"), field_name="sync.reminder_minutes"),
             reminder_method=normalize_reminder_method(sync.get("reminder_method", "popup"), default="popup"),
+            match_existing_events=config_bool(sync, "match_existing_events", True),
+            match_time_tolerance_minutes=config_int(sync, "match_time_tolerance_minutes", 90, minimum=0),
+            match_min_score=config_int(sync, "match_min_score", 8, minimum=1),
         ),
         notifications=NotificationConfig(
-            enabled=env_bool_or_config("NOTIFICATIONS_ENABLED", notifications, "enabled", False),
-            notify_on_changes=env_bool_or_config("NOTIFY_ON_CHANGES", notify_on, "changes", True),
-            notify_on_errors=env_bool_or_config("NOTIFY_ON_ERRORS", notify_on, "errors", True),
-            notify_on_success_no_changes=env_bool_or_config("NOTIFY_ON_SUCCESS_NO_CHANGES", notify_on, "success_no_changes", True),
-            include_change_details=env_bool_or_config("NOTIFY_INCLUDE_CHANGE_DETAILS", notifications, "include_change_details", True),
-            max_change_items=int(env_or_config("NOTIFY_MAX_CHANGE_ITEMS", notifications, "max_change_items", 12) or 12),
-            max_message_chars=int(env_or_config("NOTIFY_MAX_MESSAGE_CHARS", notifications, "max_message_chars", 950) or 950),
-            title_prefix=str(env_or_config("NOTIFICATION_TITLE_PREFIX", notifications, "title_prefix", "Therapieplan")),
-            intense_same_day_changes=env_bool_or_config("NOTIFY_INTENSE_SAME_DAY_CHANGES", notifications, "intense_same_day_changes", True),
-            intense_next_sync_window_changes=env_bool_or_config("NOTIFY_INTENSE_NEXT_SYNC_WINDOW_CHANGES", notifications, "intense_next_sync_window_changes", True),
+            enabled=config_bool_or_env(notifications, "enabled", "NOTIFICATIONS_ENABLED", False),
+            notify_on_changes=config_bool_or_env(notify_on, "changes", "NOTIFY_ON_CHANGES", True),
+            notify_on_errors=config_bool_or_env(notify_on, "errors", "NOTIFY_ON_ERRORS", True),
+            notify_on_success_no_changes=config_bool_or_env(notify_on, "success_no_changes", "NOTIFY_ON_SUCCESS_NO_CHANGES", True),
+            include_change_details=config_bool_or_env(notifications, "include_change_details", "NOTIFY_INCLUDE_CHANGE_DETAILS", True),
+            max_change_items=int(config_or_env(notifications, "max_change_items", "NOTIFY_MAX_CHANGE_ITEMS", 12) or 12),
+            max_message_chars=int(config_or_env(notifications, "max_message_chars", "NOTIFY_MAX_MESSAGE_CHARS", 950) or 950),
+            title_prefix=str(config_or_env(notifications, "title_prefix", "NOTIFICATION_TITLE_PREFIX", "Therapieplan")),
+            intense_same_day_changes=config_bool_or_env(notifications, "intense_same_day_changes", "NOTIFY_INTENSE_SAME_DAY_CHANGES", True),
+            intense_next_sync_window_changes=config_bool_or_env(notifications, "intense_next_sync_window_changes", "NOTIFY_INTENSE_NEXT_SYNC_WINDOW_CHANGES", True),
             level0_priority=level0_priority,
             level0_sound=level0_sound,
             level0_retry=level0_retry,
@@ -706,7 +805,7 @@ def load_config(path: Path) -> AppConfig:
             intense_same_day_retry=level1_retry,
             intense_same_day_expire=level1_expire,
             pushover={
-                "enabled": env_bool_or_config("PUSHOVER_ENABLED", pushover, "enabled", False),
+                "enabled": config_bool_or_env(pushover, "enabled", "PUSHOVER_ENABLED", False),
                 "token": str(env_or_config("PUSHOVER_TOKEN", pushover, "token", "")).strip(),
                 "user": str(env_or_config("PUSHOVER_USER", pushover, "user", "")).strip(),
                 "device": str(env_or_config("PUSHOVER_DEVICE", pushover, "device", "")).strip(),
@@ -714,10 +813,10 @@ def load_config(path: Path) -> AppConfig:
                 "sound": po_sound,
             },
             homeassistant={
-                "enabled": env_bool_or_config("HOMEASSISTANT_ENABLED", homeassistant, "enabled", False),
-                "url": str(env_or_config("HOMEASSISTANT_URL", homeassistant, "url", "")).rstrip("/"),
+                "enabled": config_bool_or_env(homeassistant, "enabled", "HOMEASSISTANT_ENABLED", False),
+                "url": str(config_or_env(homeassistant, "url", "HOMEASSISTANT_URL", "")).rstrip("/"),
                 "token": str(env_or_config("HOMEASSISTANT_TOKEN", homeassistant, "token", "")).strip(),
-                "notify_service": str(env_or_config("HOMEASSISTANT_NOTIFY_SERVICE", homeassistant, "notify_service", "")).strip(),
+                "notify_service": str(config_or_env(homeassistant, "notify_service", "HOMEASSISTANT_NOTIFY_SERVICE", "")).strip(),
             },
         ),
     )
@@ -1061,7 +1160,10 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
     today_local = dt.datetime.now(local_tz).date()
     min_date = today_local - dt.timedelta(days=cfg.sync.include_past_days)
 
-    # Für Termine ohne echte ID erzeugen wir pro Tag/Leistung/Raum/Mitarbeiter eine laufende Nummer.
+    # Für Termine ohne echte Backend-ID erzeugen wir eine möglichst stabile Identität.
+    # Raum/Mitarbeiter werden bewusst NICHT mehr in den sourceKey aufgenommen,
+    # damit Raum- oder Mitarbeiterwechsel als Update erkannt werden und nicht als
+    # Löschen + Neuerstellen. Diese Felder bleiben Teil der sourceSignature.
     weak_key_counter: Dict[str, int] = {}
     candidates: List[CalendarEventCandidate] = []
     party_filtered = 0
@@ -1116,11 +1218,7 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
                 "weak",
                 begin.date().isoformat(),
                 form,
-                service.lower(),
-                location.lower(),
-                employee.lower(),
-                coservice.lower(),
-                coemployee.lower(),
+                service.casefold(),
             ]
             if party:
                 weak_parts.append(f"party={party.casefold()}")
@@ -1174,6 +1272,11 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
                     "planName": cfg.therapy.display_name,
                     "form": form,
                     "formLabel": form_display_name,
+                    "service": service,
+                    "location": location,
+                    "employee": employee,
+                    "coservice": coservice,
+                    "coemployee": coemployee,
                     "party": party,
                     "partyFilter": describe_party_filter(cfg.therapy.party_filter),
                 }
@@ -1389,6 +1492,7 @@ def _event_detail_from_candidate(cfg: AppConfig, change_type: str, candidate: Ca
         "plan_name": cfg.therapy.display_name,
         "title": str(body.get("summary") or "Therapieplan"),
         "location": str(body.get("location") or ""),
+        "employee": str(((body.get("extendedProperties") or {}).get("private") or {}).get("employee") or ""),
         "begin": candidate.begin.isoformat(),
         "end": candidate.end.isoformat(),
     }
@@ -1405,6 +1509,7 @@ def _event_detail_from_existing(cfg: AppConfig, change_type: str, event: Dict[st
         "plan_name": str(private_props.get("planName") or cfg.therapy.display_name),
         "title": str(event.get("summary") or "Therapieplan"),
         "location": str(event.get("location") or ""),
+        "employee": str(private_props.get("employee") or ""),
         "begin": begin.isoformat() if begin else "",
         "end": end.isoformat() if end else "",
     }
@@ -1427,6 +1532,8 @@ def _change_detail_dedupe_key(detail: Dict[str, Any]) -> Tuple[Any, ...]:
         detail.get("old_end"),
         detail.get("old_title"),
         detail.get("old_location"),
+        detail.get("old_employee"),
+        detail.get("employee"),
     )
 
 
@@ -1444,8 +1551,12 @@ def _add_update_diff(detail: Dict[str, Any], existing: Dict[str, Any], candidate
     old_end = _event_datetime_from_body(existing.get("end") or {}, local_tz)
     old_title = str(existing.get("summary") or "")
     old_location = str(existing.get("location") or "")
+    old_private = event_private_properties(existing)
+    old_employee = str(old_private.get("employee") or "")
     new_title = str(candidate.google_body.get("summary") or "")
     new_location = str(candidate.google_body.get("location") or "")
+    new_private = ((candidate.google_body.get("extendedProperties") or {}).get("private") or {})
+    new_employee = str(new_private.get("employee") or "")
 
     if old_begin and old_begin != candidate.begin:
         detail["old_begin"] = old_begin.isoformat()
@@ -1455,7 +1566,158 @@ def _add_update_diff(detail: Dict[str, Any], existing: Dict[str, Any], candidate
         detail["old_title"] = old_title
     if old_location != new_location:
         detail["old_location"] = old_location
+    if old_employee and old_employee != new_employee:
+        detail["old_employee"] = old_employee
+    if new_employee:
+        detail["employee"] = new_employee
     return detail
+
+
+
+def _candidate_private(candidate: CalendarEventCandidate) -> Dict[str, Any]:
+    return ((candidate.google_body.get("extendedProperties") or {}).get("private") or {})
+
+
+def _event_title_normalized(event: Dict[str, Any]) -> str:
+    return clean_text(event.get("summary")).casefold()
+
+
+def _candidate_title_normalized(candidate: CalendarEventCandidate) -> str:
+    return clean_text(candidate.google_body.get("summary")).casefold()
+
+
+def _same_local_date(a: Optional[dt.datetime], b: dt.datetime, timezone: str) -> bool:
+    if a is None:
+        return False
+    tz = ZoneInfo(timezone)
+    return a.astimezone(tz).date() == b.astimezone(tz).date()
+
+
+def _minutes_abs_delta(a: Optional[dt.datetime], b: dt.datetime) -> Optional[float]:
+    if a is None:
+        return None
+    return abs((a - b).total_seconds()) / 60.0
+
+
+def _duration_minutes(begin: Optional[dt.datetime], end: Optional[dt.datetime]) -> Optional[int]:
+    if begin is None or end is None:
+        return None
+    return int(round((end - begin).total_seconds() / 60.0))
+
+
+def fuzzy_match_score(existing: Dict[str, Any], candidate: CalendarEventCandidate, cfg: AppConfig) -> Tuple[int, List[str]]:
+    """Bewertet, ob ein vorhandener Google-Termin fachlich derselbe Termin ist.
+
+    Zweck: Wenn das Backend keine echte Termin-ID liefert und sich Raum oder Mitarbeiter
+    ändern, ändert sich bei alten Versionen der sourceKey. Diese zweite Matching-Stufe
+    verhindert dann ein künstliches Löschen + Neuerstellen.
+    """
+    local_tz = ZoneInfo(cfg.google.timezone)
+    existing_private = event_private_properties(existing)
+    candidate_private = _candidate_private(candidate)
+
+    # Wenn Plan/Form/Party eindeutig widersprechen, ist es kein Match.
+    existing_plan = str(existing_private.get("planId") or "")
+    if existing_plan and existing_plan != cfg.therapy.plan_id:
+        return 0, ["anderer Plan"]
+
+    existing_form = str(existing_private.get("form") or "")
+    candidate_form = str(candidate_private.get("form") or "")
+    if existing_form and candidate_form and existing_form != candidate_form:
+        return 0, ["andere Terminart"]
+
+    existing_party = str(existing_private.get("party") or "")
+    candidate_party = str(candidate_private.get("party") or "")
+    if existing_party and candidate_party and existing_party != candidate_party:
+        return 0, ["andere Party"]
+
+    existing_begin = _event_datetime_from_body(existing.get("start") or {}, local_tz)
+    existing_end = _event_datetime_from_body(existing.get("end") or {}, local_tz)
+    if not _same_local_date(existing_begin, candidate.begin, cfg.google.timezone):
+        return 0, ["anderer Tag"]
+
+    score = 0
+    reasons: List[str] = ["gleicher Tag"]
+
+    if existing_form and candidate_form and existing_form == candidate_form:
+        score += 2
+        reasons.append("Terminart gleich")
+    if existing_party == candidate_party:
+        score += 1
+        reasons.append("Party gleich")
+
+    old_title = _event_title_normalized(existing)
+    new_title = _candidate_title_normalized(candidate)
+    if old_title and new_title:
+        if old_title == new_title:
+            score += 4
+            reasons.append("Titel gleich")
+        else:
+            ratio = difflib.SequenceMatcher(None, old_title, new_title).ratio()
+            if ratio >= 0.86:
+                score += 3
+                reasons.append(f"Titel ähnlich ({ratio:.2f})")
+
+    begin_delta = _minutes_abs_delta(existing_begin, candidate.begin)
+    if begin_delta is not None:
+        if begin_delta == 0:
+            score += 4
+            reasons.append("Start gleich")
+        elif begin_delta <= cfg.sync.match_time_tolerance_minutes:
+            score += 2
+            reasons.append(f"Start ähnlich ({begin_delta:.0f} min)")
+        else:
+            return 0, [f"Start zu weit entfernt ({begin_delta:.0f} min)"]
+
+    old_duration = _duration_minutes(existing_begin, existing_end)
+    new_duration = _duration_minutes(candidate.begin, candidate.end)
+    if old_duration is not None and new_duration is not None:
+        if old_duration == new_duration:
+            score += 2
+            reasons.append("Dauer gleich")
+        elif abs(old_duration - new_duration) <= 15:
+            score += 1
+            reasons.append("Dauer ähnlich")
+
+    old_location = clean_text(existing.get("location")).casefold()
+    new_location = clean_text(candidate.google_body.get("location")).casefold()
+    if old_location and new_location and old_location == new_location:
+        score += 2
+        reasons.append("Ort gleich")
+
+    old_employee = clean_text(existing_private.get("employee")).casefold()
+    new_employee = clean_text(candidate_private.get("employee")).casefold()
+    if old_employee and new_employee and old_employee == new_employee:
+        score += 2
+        reasons.append("Mitarbeiter gleich")
+
+    return score, reasons
+
+
+def find_existing_event_by_similarity(
+    existing_by_key: Dict[str, Dict[str, Any]],
+    candidate: CalendarEventCandidate,
+    cfg: AppConfig,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], int, List[str]]:
+    if not cfg.sync.match_existing_events:
+        return None, None, 0, []
+
+    best_key: Optional[str] = None
+    best_event: Optional[Dict[str, Any]] = None
+    best_score = 0
+    best_reasons: List[str] = []
+
+    for source_key, event in existing_by_key.items():
+        score, reasons = fuzzy_match_score(event, candidate, cfg)
+        if score > best_score:
+            best_key = source_key
+            best_event = event
+            best_score = score
+            best_reasons = reasons
+
+    if best_event is not None and best_score >= cfg.sync.match_min_score:
+        return best_key, best_event, best_score, best_reasons
+    return None, None, best_score, best_reasons
 
 
 def target_calendar_ids(cfg: AppConfig) -> Tuple[str, ...]:
@@ -1503,6 +1765,22 @@ def sync_to_google(plan: Dict[str, Any], cfg: AppConfig, state: Dict[str, Any]) 
 
         for candidate in candidates:
             existing = existing_by_key.get(candidate.source_key)
+            matched_old_key: Optional[str] = None
+            matched_by_similarity = False
+            if existing is None:
+                matched_old_key, similar_existing, score, reasons = find_existing_event_by_similarity(existing_by_key, candidate, cfg)
+                if similar_existing is not None and matched_old_key is not None:
+                    existing = similar_existing
+                    matched_by_similarity = True
+                    logging.info(
+                        "Bestehenden Termin per Ähnlichkeit gematcht in %s: %s -> neuer sourceKey=%s alter sourceKey=%s Score=%s (%s)",
+                        calendar_id,
+                        candidate.google_body.get("summary"),
+                        candidate.source_key,
+                        matched_old_key,
+                        score,
+                        ", ".join(reasons),
+                    )
             try:
                 if existing is None:
                     write_body = body_with_sync_timestamps(candidate, cfg)
@@ -1529,6 +1807,8 @@ def sync_to_google(plan: Dict[str, Any], cfg: AppConfig, state: Dict[str, Any]) 
                         detail.setdefault("calendar_ids", []).append(calendar_id)
                         write_body = body_with_sync_timestamps(candidate, cfg, existing=existing, mark_modified=True)
                         patched = patch_event(service, cfg, existing["id"], dataclasses.replace(candidate, google_body=write_body), calendar_id)
+                        if matched_by_similarity and matched_old_key and matched_old_key != candidate.source_key:
+                            existing_by_key.pop(matched_old_key, None)
                         existing_by_key[candidate.source_key] = patched
                         stats["updated"] = int(stats.get("updated", 0)) + 1
                         calendar_stats["updated"] = int(calendar_stats.get("updated", 0)) + 1
@@ -1592,6 +1872,15 @@ def should_notify(cfg: AppConfig, *, stats: Optional[Dict[str, int]] = None, err
         return cfg.notifications.notify_on_errors
     if changes > 0:
         return cfg.notifications.notify_on_changes
+
+    # Retry-Läufe, die nur wegen "keine Änderungen" gestartet wurden, sollen nicht
+    # bei jedem erneuten unveränderten Abruf eine Erfolgsmeldung auslösen.
+    # Echte Änderungen und Fehler werden oben weiterhin gemeldet.
+    suppress_no_change = str(os.environ.get("SYNC_SUPPRESS_NO_CHANGE_NOTIFICATION", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if suppress_no_change:
+        logging.info("Keine Pushmeldung für unveränderten Retry-Lauf: SYNC_SUPPRESS_NO_CHANGE_NOTIFICATION=1")
+        return False
+
     return cfg.notifications.notify_on_success_no_changes
 
 
@@ -1624,6 +1913,7 @@ def _format_change_detail(detail: Dict[str, Any], timezone: str) -> str:
         old_end = _parse_iso_datetime(detail.get("old_end"), timezone)
         old_title = str(detail.get("old_title") or "").strip()
         old_location = str(detail.get("old_location") or "").strip()
+        old_employee = str(detail.get("old_employee") or "").strip()
         diff_parts: List[str] = []
         if old_begin:
             diff_parts.append(f"vorher { _format_event_range(old_begin, old_end, timezone) }")
@@ -1631,6 +1921,8 @@ def _format_change_detail(detail: Dict[str, Any], timezone: str) -> str:
             diff_parts.append(f"vorher Titel '{old_title}'")
         if old_location:
             diff_parts.append(f"vorher Ort '{old_location}'")
+        if old_employee:
+            diff_parts.append(f"vorher Mitarbeiter '{old_employee}'")
         if diff_parts:
             line += " [" + "; ".join(diff_parts) + "]"
     return line
@@ -1686,7 +1978,7 @@ def _notification_next_sync_window(cfg: AppConfig) -> Optional[Tuple[dt.datetime
             return start.astimezone(local_tz), end.astimezone(local_tz)
 
     now = dt.datetime.now(local_tz)
-    raw_times = os.environ.get("SYNC_TIMES", "06:00,12:00,18:00,22:00")
+    raw_times = ",".join(cfg.scheduler.sync_times) if cfg.scheduler.sync_times else os.environ.get("SYNC_TIMES", "07:30,10:00,12:00,18:00")
     times = _parse_sync_time_values(raw_times)
     end = _next_boundary_after(now, times)
     if end is None:

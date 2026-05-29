@@ -1,181 +1,72 @@
 # Installation
 
-Diese Anleitung beschreibt die Installation unter Linux mit Docker Compose.
-
 ## Voraussetzungen
 
-- Linux-Host oder Linux-VM
-- Docker Engine
-- Docker Compose Plugin (`docker compose`)
-- ausgehender HTTPS-Zugriff auf:
-  - die Therapieplan-Webseite
-  - Google APIs
-  - optional Pushover oder Home Assistant
-- Google-Konto mit Schreibrechten auf den Zielkalender
+- Linux-Host mit Docker und Docker Compose
+- Google-Konto mit Kalenderzugriff
+- Google Cloud OAuth-Client vom Typ Desktop-App
+- optional: Pushover oder Home Assistant für Pushmeldungen
 
-## 1. Docker installieren
-
-Debian/Ubuntu-Beispiel:
-
-```bash
-sudo apt update
-sudo apt install -y ca-certificates curl gnupg
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-```
-
-Danach gemäß Docker-Dokumentation das passende Repository für deine Distribution einrichten und installieren:
-
-```bash
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-```
-
-Docker aktivieren:
-
-```bash
-sudo systemctl enable --now docker
-```
-
-Optional den aktuellen Benutzer in die Docker-Gruppe aufnehmen:
-
-```bash
-sudo usermod -aG docker "$USER"
-```
-
-Danach einmal abmelden/anmelden.
-
-## 2. Projekt vorbereiten
-
-Aus ZIP:
-
-```bash
-unzip therapieplan-calendar-sync-container-github-docs.zip -d therapieplan-calendar-sync
-cd therapieplan-calendar-sync
-```
-
-Aus Git:
+## Repository klonen
 
 ```bash
 git clone <repository-url> therapieplan-calendar-sync
 cd therapieplan-calendar-sync
 ```
 
-## 3. Beispielkonfiguration kopieren
+## Konfigurationsdateien erstellen
 
 ```bash
 cp .env.example .env
 cp data/config.example.yaml data/config.yaml
 ```
 
-
-## 4. Zugriffsrechte setzen
-
-```bash
-chmod +x scripts/*.sh
-chmod 600 .env data/config.yaml 2>/dev/null || true
-```
-
-Wenn echte Google-/Pushover-Schlüssel eingetragen sind, sollten `.env`, `data/config.yaml`, `data/credentials.json`, `data/token.json` und `data/state.json` nicht für andere Benutzer lesbar sein.
-
-## 5. Container bauen
+Danach:
 
 ```bash
-docker compose build
-```
-
-## 6. Google-OAuth einrichten
-
-Die Google-Einrichtung ist im Detail in [GOOGLE_SETUP.md](GOOGLE_SETUP.md) beschrieben.
-
-Kurzform:
-
-```bash
-cp ~/Downloads/client_secret_*.json data/credentials.json
-./scripts/init-google-auth.sh
-```
-
-Nach erfolgreichem Login muss diese Datei existieren:
-
-```bash
-ls -l data/token.json
-```
-
-## 7. Therapieplan und Kalender konfigurieren
-
-Öffne:
-
-```bash
+nano .env
 nano data/config.yaml
 ```
 
-Mindestens setzen:
+In `.env` stehen nur Secrets und technische Werte. In `data/config.yaml` stehen Therapieplan-URLs, Sync-Zeiten, Kalender, Pushregeln, Farben, Erinnerungen und Filter.
 
-```yaml
-therapy_plans:
-  - id: "person-1"
-    name: "Person 1"
-    url: "https://rehaklinik-werscherberg.ssint-online.de:996/ipp/app/DEIN_TOKEN/"
-    birth_date: "TT.MM.JJJJ"
+## Google-Credentials ablegen
 
-google:
-  calendar_ids:
-    - "primary"
+Die aus Google Cloud heruntergeladene OAuth-Datei muss hier liegen:
+
+```bash
+cp ~/Downloads/client_secret_*.json data/credentials.json
 ```
 
-Für einen separaten Kalender trägst du dessen Kalender-ID ein:
+## Google OAuth initialisieren
 
-```yaml
-google:
-  calendar_ids:
-    - "abcdef1234567890@group.calendar.google.com"
+```bash
+./scripts/init-google-auth.sh
 ```
 
-## 8. Testlauf ohne Änderungen
+Danach sollte `data/token.json` existieren.
+
+Token prüfen:
+
+```bash
+./scripts/check-google-token.sh
+```
+
+## Test
 
 ```bash
 ./scripts/dry-run.sh
-```
-
-Der Dry-Run ruft den Therapieplan ab und schreibt eine Diagnoseausgabe, ändert aber keine Google-Kalendertermine.
-
-## 9. Einmaliger echter Sync
-
-```bash
 ./scripts/run-once.sh
 ```
 
-Prüfe danach Google Kalender.
-
-## 10. Dauerbetrieb starten
-
-```bash
-docker compose up -d therapieplan-sync
-```
-
-Oder:
+## Dauerbetrieb
 
 ```bash
 ./scripts/start.sh
 ```
 
-## 11. Autostart nach Reboot
-
-In `docker-compose.yml` ist für den Hauptcontainer gesetzt:
-
-```yaml
-restart: unless-stopped
-```
-
-Damit der Container nach einem Host-Neustart wieder startet, muss Docker selbst automatisch starten:
+Logs:
 
 ```bash
-sudo systemctl enable --now docker
-```
-
-## 12. Status prüfen
-
-```bash
-docker ps
 ./scripts/logs.sh
 ```
