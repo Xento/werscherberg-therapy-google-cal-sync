@@ -40,7 +40,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
-SYNC_VERSION = "2.0"
+SYNC_VERSION = "2.1"
 SUPPORTED_FORMS = {"V", "A", "E", "C", "G"}
 HIDDEN_FLAG = 0x20000000
 
@@ -1213,10 +1213,15 @@ def make_candidates(plan: Dict[str, Any], cfg: AppConfig) -> List[CalendarEventC
         if explicit_id:
             stable_material = f"plan={cfg.therapy.plan_id}|explicit|{explicit_id}{party_key_part}"
         else:
+            # Die lokale Startzeit ist Teil der stabilen Identität. Dadurch werden
+            # mehrere fachlich gleiche Termine am selben Tag, aber mit unterschiedlichen
+            # Uhrzeiten, nicht mehr versehentlich gegeneinander gematcht. Raum und
+            # Mitarbeiter bleiben bewusst draußen, damit deren Änderung ein Update bleibt.
             weak_parts = [
                 f"plan={cfg.therapy.plan_id}",
                 "weak",
                 begin.date().isoformat(),
+                begin.strftime("%H:%M"),
                 form,
                 service.casefold(),
             ]
@@ -1605,7 +1610,61 @@ def _duration_minutes(begin: Optional[dt.datetime], end: Optional[dt.datetime]) 
     return int(round((end - begin).total_seconds() / 60.0))
 
 
-def fuzzy_match_score(existing: Dict[str, Any], candidate: CalendarEventCandidate, cfg: AppConfig) -> Tuple[int, List[str]]:
+def _event_group_key(event: Dict[str, Any], cfg: AppConfig) -> Optional[Tuple[str, str, str, str]]:
+    """Gruppiert fachlich gleiche Termine eines Tages für Ambiguitätsprüfungen."""
+    local_tz = ZoneInfo(cfg.google.timezone)
+    begin = _event_datetime_from_body(event.get("start") or {}, local_tz)
+    if begin is None:
+        return None
+    private_props = event_private_properties(event)
+    return (
+        begin.astimezone(local_tz).date().isoformat(),
+        str(private_props.get("form") or ""),
+        str(private_props.get("party") or ""),
+        _event_title_normalized(event),
+    )
+
+
+def _candidate_group_key(candidate: CalendarEventCandidate, cfg: AppConfig) -> Tuple[str, str, str, str]:
+    local_tz = ZoneInfo(cfg.google.timezone)
+    private_props = _candidate_private(candidate)
+    return (
+        candidate.begin.astimezone(local_tz).date().isoformat(),
+        str(private_props.get("form") or ""),
+        str(private_props.get("party") or ""),
+        _candidate_title_normalized(candidate),
+    )
+
+
+def _group_is_ambiguous(
+    existing_by_key: Dict[str, Dict[str, Any]],
+    all_candidates: Sequence[CalendarEventCandidate],
+    candidate: CalendarEventCandidate,
+    cfg: AppConfig,
+) -> bool:
+    """True, wenn es denselben Titel/Form/Party am selben Tag mehrfach gibt.
+
+    In diesem Fall darf das Fuzzy-Matching nicht über unterschiedliche Startzeiten
+    hinweg matchen, sonst können zwei gleich benannte Termine am selben Tag beim
+    nächsten Sync gegenseitig als Änderung erkannt werden.
+    """
+    group_key = _candidate_group_key(candidate, cfg)
+    candidate_count = sum(1 for item in all_candidates if _candidate_group_key(item, cfg) == group_key)
+    existing_count = sum(
+        1
+        for event in existing_by_key.values()
+        if _event_group_key(event, cfg) == group_key
+    )
+    return candidate_count > 1 or existing_count > 1
+
+
+def fuzzy_match_score(
+    existing: Dict[str, Any],
+    candidate: CalendarEventCandidate,
+    cfg: AppConfig,
+    *,
+    require_exact_start: bool = False,
+) -> Tuple[int, List[str]]:
     """Bewertet, ob ein vorhandener Google-Termin fachlich derselbe Termin ist.
 
     Zweck: Wenn das Backend keine echte Termin-ID liefert und sich Raum oder Mitarbeiter
@@ -1661,11 +1720,16 @@ def fuzzy_match_score(existing: Dict[str, Any], candidate: CalendarEventCandidat
     begin_delta = _minutes_abs_delta(existing_begin, candidate.begin)
     if begin_delta is not None:
         if begin_delta == 0:
-            score += 4
+            score += 5
             reasons.append("Start gleich")
-        elif begin_delta <= cfg.sync.match_time_tolerance_minutes:
+        elif require_exact_start:
+            return 0, [f"Start nicht gleich bei mehrfach gleichem Termin ({begin_delta:.0f} min)"]
+        elif begin_delta <= 15:
             score += 2
             reasons.append(f"Start ähnlich ({begin_delta:.0f} min)")
+        elif begin_delta <= cfg.sync.match_time_tolerance_minutes:
+            score += 1
+            reasons.append(f"Start im Toleranzfenster ({begin_delta:.0f} min)")
         else:
             return 0, [f"Start zu weit entfernt ({begin_delta:.0f} min)"]
 
@@ -1696,6 +1760,7 @@ def fuzzy_match_score(existing: Dict[str, Any], candidate: CalendarEventCandidat
 
 def find_existing_event_by_similarity(
     existing_by_key: Dict[str, Dict[str, Any]],
+    all_candidates: Sequence[CalendarEventCandidate],
     candidate: CalendarEventCandidate,
     cfg: AppConfig,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], int, List[str]]:
@@ -1706,14 +1771,23 @@ def find_existing_event_by_similarity(
     best_event: Optional[Dict[str, Any]] = None
     best_score = 0
     best_reasons: List[str] = []
+    second_best_score = 0
+    require_exact_start = _group_is_ambiguous(existing_by_key, all_candidates, candidate, cfg)
 
     for source_key, event in existing_by_key.items():
-        score, reasons = fuzzy_match_score(event, candidate, cfg)
+        score, reasons = fuzzy_match_score(event, candidate, cfg, require_exact_start=require_exact_start)
         if score > best_score:
+            second_best_score = best_score
             best_key = source_key
             best_event = event
             best_score = score
             best_reasons = reasons
+        elif score > second_best_score:
+            second_best_score = score
+
+    # Bei mehreren gleichartigen Terminen vermeiden wir knappe, mehrdeutige Matches.
+    if require_exact_start and best_score and (best_score - second_best_score) < 2:
+        return None, None, best_score, best_reasons + ["mehrdeutiges Match"]
 
     if best_event is not None and best_score >= cfg.sync.match_min_score:
         return best_key, best_event, best_score, best_reasons
@@ -1768,7 +1842,7 @@ def sync_to_google(plan: Dict[str, Any], cfg: AppConfig, state: Dict[str, Any]) 
             matched_old_key: Optional[str] = None
             matched_by_similarity = False
             if existing is None:
-                matched_old_key, similar_existing, score, reasons = find_existing_event_by_similarity(existing_by_key, candidate, cfg)
+                matched_old_key, similar_existing, score, reasons = find_existing_event_by_similarity(existing_by_key, candidates, candidate, cfg)
                 if similar_existing is not None and matched_old_key is not None:
                     existing = similar_existing
                     matched_by_similarity = True

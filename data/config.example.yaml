@@ -116,6 +116,8 @@ sync:
   # true = Wenn sich z. B. nur Raum oder Mitarbeiter ändert, wird ein bestehender
   # Termin anhand mehrerer Kriterien als derselbe Termin erkannt und aktualisiert,
   # statt einen zweiten Termin anzulegen.
+  # Mehrere gleiche Termine am selben Tag werden über die Startzeit getrennt;
+  # dort wird nicht über abweichende Uhrzeiten hinweg gematcht.
   match_existing_events: true
   match_time_tolerance_minutes: 90
   match_min_score: 8

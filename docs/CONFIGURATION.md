@@ -167,6 +167,8 @@ Die Logik prüft mehrere Kriterien, u. a. Tag, Uhrzeit, Dauer, Titel, Terminart,
 
 Wichtig: Raum und Mitarbeiter sind Teil der Änderungsprüfung, aber nicht mehr Teil der stabilen Termin-Identität. Dadurch werden Änderungen an diesen Feldern korrekt als `updated` erkannt.
 
+Mehrere fachlich gleiche Termine am selben Tag werden zusätzlich über die lokale Startzeit getrennt. Wenn es also z. B. zweimal denselben Termin mit gleicher Bezeichnung, gleicher Terminart und gleicher Party an einem Tag gibt, wird beim Fuzzy-Matching kein abweichender Startzeitpunkt akzeptiert. Dadurch werden solche Termine beim nächsten Sync nicht gegenseitig als Änderung erkannt.
+
 ### Erinnerungen
 
 ```yaml
